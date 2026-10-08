@@ -51,7 +51,7 @@ class UserTable {
                 res.reset(_db->query_one<User>(query::phone == phone));
                 trans.commit();
             }catch (std::exception &e) {
-                LOG_ERROR("通过手机号查询用户失败 {}:{}！", phone, e.what());
+                LOG_ERROR("通过手机号查询用户失败：{}！", e.what());
             }
             return res;
         }

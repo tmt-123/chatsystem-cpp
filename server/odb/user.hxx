@@ -57,7 +57,7 @@ class User {
         #pragma db type("varchar(64)") index unique
         odb::nullable<std::string> _nickname; //用户昵称-不一定存在
         odb::nullable<std::string> _description; //用户签名 - 不一定存在
-        #pragma db type("varchar(64)")
+        #pragma db type("varchar(255)")
         odb::nullable<std::string> _password; //用户密码 - 不一定存在
         #pragma db type("varchar(64)") index unique
         odb::nullable<std::string> _phone; //用户手机号 - 不一定存在

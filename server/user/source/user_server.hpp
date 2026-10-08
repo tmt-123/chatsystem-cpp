@@ -55,15 +55,15 @@ class UserServiceImpl : public bite_im::UserService {
         //校验密码格式：长度6~15，且只能包含字母、数字、下划线_、连字符-
         bool password_check(const std::string &password) {
             if (password.size() < 6 || password.size() > 15) {
-                LOG_ERROR("密码长度不合法：{}-{}", password, password.size());
+                LOG_ERROR("密码长度不合法，长度={}", password.size());
                 return false;
             }
             for (int i = 0; i < password.size(); i++) {
-                if (!((password[i] > 'a' && password[i] < 'z') ||
-                    (password[i] > 'A' && password[i] < 'Z') ||
-                    (password[i] > '0' && password[i] < '9') ||
+                if (!((password[i] >= 'a' && password[i] <= 'z') ||
+                    (password[i] >= 'A' && password[i] <= 'Z') ||
+                    (password[i] >= '0' && password[i] <= '9') ||
                     password[i] == '_' || password[i] == '-')) {
-                    LOG_ERROR("密码字符不合法：{}", password);
+                    LOG_ERROR("密码包含不允许的字符");
                     return false;
                 }
             }
@@ -107,8 +107,15 @@ class UserServiceImpl : public bite_im::UserService {
                 return err_response(request->request_id(), "用户名被占用!");
             }
             //5. 向数据库新增数据
+            std::string password_hash;
+            try {
+                password_hash = hashPassword(password);
+            } catch (const std::exception &e) {
+                LOG_ERROR("{} - 密码哈希生成失败：{}", request->request_id(), e.what());
+                return err_response(request->request_id(), "密码安全处理失败!");
+            }
             std::string uid = uuid();
-            user = std::make_shared<User>(uid, nickname, password);
+            user = std::make_shared<User>(uid, nickname, password_hash);
             ret = _mysql_user->insert(user);
             if (ret == false) {
                 LOG_ERROR("{} - Mysql数据库新增数据失败！", request->request_id());
@@ -143,8 +150,26 @@ class UserServiceImpl : public bite_im::UserService {
             std::string password = request->password();
             //2. 通过昵称获取用户信息，进行密码是否一致的判断
             auto user = _mysql_user->select_by_nickname(nickname);
-            if (!user || password != user->password()) {
-                LOG_ERROR("{} - 用户名或密码错误 - {}-{}！", request->request_id(), nickname, password);
+            if (!user) {
+                LOG_ERROR("{} - 用户名或密码错误，用户={}！", request->request_id(), nickname);
+                return err_response(request->request_id(), "用户名或密码错误!");
+            }
+            const std::string stored_password = user->password();
+            bool password_valid = verifyPassword(password, stored_password);
+            // 兼容已有数据库中的历史明文密码，登录成功后立即升级为安全哈希。
+            if (!passwordIsHashed(stored_password) && password == stored_password) {
+                password_valid = true;
+                try {
+                    user->password(hashPassword(password));
+                    if (!_mysql_user->update(user)) {
+                        LOG_WARN("{} - 历史密码哈希升级失败，用户={}", request->request_id(), nickname);
+                    }
+                } catch (const std::exception &e) {
+                    LOG_WARN("{} - 历史密码哈希升级异常，用户={}：{}", request->request_id(), nickname, e.what());
+                }
+            }
+            if (!password_valid) {
+                LOG_ERROR("{} - 用户名或密码错误，用户={}！", request->request_id(), nickname);
                 return err_response(request->request_id(), "用户名或密码错误!");
             }
             //3. 根据 redis 中的登录标记信息是否存在判断用户是否已经登录。
@@ -192,7 +217,7 @@ class UserServiceImpl : public bite_im::UserService {
             // 2. 验证手机号码格式是否正确（必须以 1 开始，第二位 3~9 之间，后边 9 个数字字符）
             bool ret = phone_check(phone);
             if (ret == false) {
-                LOG_ERROR("{} - 手机号码格式错误 - {}！", request->request_id(), phone);
+                LOG_ERROR("{} - 手机号码格式错误！", request->request_id());
                 return err_response(request->request_id(), "手机号码格式错误!");
             }
             // 3. 生成 4 位随机验证码
@@ -201,7 +226,7 @@ class UserServiceImpl : public bite_im::UserService {
             // 4. 基于短信平台 SDK 发送验证码
             ret = _dms_client->send(phone, code);
             if (ret == false) {
-                LOG_ERROR("{} - 短信验证码发送失败 - {}！", request->request_id(), phone);
+                LOG_ERROR("{} - 短信验证码发送失败！", request->request_id());
                 return err_response(request->request_id(), "短信验证码发送失败!");
             }
             // 5. 构造验证码 ID，添加到 redis 验证码映射键值索引中
@@ -233,19 +258,19 @@ class UserServiceImpl : public bite_im::UserService {
             // 2. 检查注册手机号码是否合法
             bool ret = phone_check(phone);
             if (ret == false) {
-                LOG_ERROR("{} - 手机号码格式错误 - {}！", request->request_id(), phone);
+                LOG_ERROR("{} - 手机号码格式错误！", request->request_id());
                 return err_response(request->request_id(), "手机号码格式错误!");
             }
             // 3. 从 redis 数据库中进行验证码 ID-验证码一致性匹配
             auto vcode = _redis_codes->code(code_id);
             if (vcode != code) {
-                LOG_ERROR("{} - 验证码错误 - {}-{}！", request->request_id(), code_id, code);
+                LOG_ERROR("{} - 验证码错误！", request->request_id());
                 return err_response(request->request_id(), "验证码错误!");
             }
             // 4. 通过数据库查询判断手机号是否已经注册过
             auto user = _mysql_user->select_by_phone(phone);
             if (user) {
-                LOG_ERROR("{} - 该手机号已注册过用户 - {}！", request->request_id(), phone);
+                LOG_ERROR("{} - 该手机号已注册过用户！", request->request_id());
                 return err_response(request->request_id(), "该手机号已注册过用户!");
             }
             // 5. 向数据库新增用户信息
@@ -253,7 +278,7 @@ class UserServiceImpl : public bite_im::UserService {
             user = std::make_shared<User>(uid, phone);
             ret = _mysql_user->insert(user);
             if (ret == false) {
-                LOG_ERROR("{} - 向数据库添加用户信息失败 - {}！", request->request_id(), phone);
+                LOG_ERROR("{} - 向数据库添加用户信息失败！", request->request_id());
                 return err_response(request->request_id(), "向数据库添加用户信息失败!");
             }
             // 6. 向 ES 服务器中新增用户信息
@@ -287,26 +312,26 @@ class UserServiceImpl : public bite_im::UserService {
             // 2. 检查注册手机号码是否合法
             bool ret = phone_check(phone);
             if (ret == false) {
-                LOG_ERROR("{} - 手机号码格式错误 - {}！", request->request_id(), phone);
+                LOG_ERROR("{} - 手机号码格式错误！", request->request_id());
                 return err_response(request->request_id(), "手机号码格式错误!");
             }
             // 3. 根据手机号从数据数据进行用户信息查询，判断用用户是否存在
             auto user = _mysql_user->select_by_phone(phone);
             if (!user) {
-                LOG_ERROR("{} - 该手机号未注册用户 - {}！", request->request_id(), phone);
+                LOG_ERROR("{} - 该手机号未注册用户！", request->request_id());
                 return err_response(request->request_id(), "该手机号未注册用户!");
             }
             // 4. 从 redis 数据库中进行验证码 ID-验证码一致性匹配
             auto vcode = _redis_codes->code(code_id);
             if (vcode != code) {
-                LOG_ERROR("{} - 验证码错误 - {}-{}！", request->request_id(), code_id, code);
+                LOG_ERROR("{} - 验证码错误！", request->request_id());
                 return err_response(request->request_id(), "验证码错误!");
             }
             _redis_codes->remove(code_id);
             // 5. 根据 redis 中的登录标记信息是否存在判断用户是否已经登录。
             ret = _redis_status->exists(user->user_id());
             if (ret == true) {
-                LOG_ERROR("{} - 用户已在其他地方登录 - {}！", request->request_id(), phone);
+                LOG_ERROR("{} - 用户已在其他地方登录！", request->request_id());
                 return err_response(request->request_id(), "用户已在其他地方登录!");
             }
             //6. 构造会话 ID，生成会话键值对，向 redis 中添加会话信息以及登录标记信息
@@ -608,7 +633,7 @@ class UserServiceImpl : public bite_im::UserService {
             // 2. 对验证码进行验证
             auto vcode = _redis_codes->code(code_id);
             if (vcode != code) {
-                LOG_ERROR("{} - 验证码错误 - {}-{}！", request->request_id(), code_id, code);
+                LOG_ERROR("{} - 验证码错误！", request->request_id());
                 return err_response(request->request_id(), "验证码错误!");
             }
             // 3. 从数据库通过用户 ID 进行用户信息查询，判断用户是否存在
@@ -621,14 +646,14 @@ class UserServiceImpl : public bite_im::UserService {
             user->phone(new_phone);
             bool ret = _mysql_user->update(user);
             if (ret == false) {
-                LOG_ERROR("{} - 更新数据库用户手机号失败 ：{}！", request->request_id(), new_phone);
+                LOG_ERROR("{} - 更新数据库用户手机号失败！", request->request_id());
                 return err_response(request->request_id(), "更新数据库用户手机号失败!");
             }
             // 5. 更新 ES 服务器中用户信息
             ret = _es_user->appendData(user->user_id(), user->phone(),
                 user->nickname(), user->description(), user->avatar_id());
             if (ret == false) {
-                LOG_ERROR("{} - 更新搜索引擎用户手机号失败 ：{}！", request->request_id(), new_phone);
+                LOG_ERROR("{} - 更新搜索引擎用户手机号失败！", request->request_id());
                 return err_response(request->request_id(), "更新搜索引擎用户手机号失败!");
             }
             // 6. 组织响应，返回更新成功与否
