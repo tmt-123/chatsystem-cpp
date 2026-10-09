@@ -20,6 +20,7 @@ message NewMessageReq {
     optional string session_id = 3;//客户端身份识别信息 -- 这就是消息发送者
     string chat_session_id = 4;  //聊天会话ID -- 标识了当前消息属于哪个会话，应该转发给谁
     MessageContent message = 5; // 消息内容--消息类型+内容
+    string client_message_id = 6; //客户端生成的幂等ID，网络重试时必须复用
 }
 
 //新消息发送响应 -- 消息转发子服务回给网关,再由网关转为HTTP响应回客户端
@@ -27,7 +28,11 @@ message NewMessageReq {
 message NewMessageRsp {
     string request_id = 1;
     bool success = 2;
-    string errmsg = 3; 
+    string errmsg = 3;
+    string client_message_id = 4;
+    string message_id = 5;
+    DeliveryStatus delivery_status = 6;
+    uint32 delivered_target_count = 7;
 }
 
 //消息转发目标响应 -- 用于网关与消息转发子服务内部的通信

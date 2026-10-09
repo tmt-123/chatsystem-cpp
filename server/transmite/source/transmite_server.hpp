@@ -64,7 +64,12 @@ class TransmiteServiceImpl : public bite_im::MsgTransmitService {
             std::string rid = request->request_id();
             std::string uid = request->user_id();
             std::string chat_ssid = request->chat_session_id();
+            std::string client_mid = request->client_message_id();
             const MessageContent &content = request->message();
+            if (client_mid.empty() || client_mid.size() > 64) {
+                LOG_ERROR("{} - 客户端消息ID无效！", rid);
+                return err_response(rid, "客户端消息ID无效!");
+            }
             //2. 调用用户子服务获取发送者完整信息(昵称/头像等),用于组装MessageInfo的sender字段
             auto channel = _mm_channels->choose(_user_service_name);
             if (!channel) {
@@ -84,7 +89,9 @@ class TransmiteServiceImpl : public bite_im::MsgTransmitService {
             }
             //3. 组装完整的MessageInfo:消息ID/会话ID/时间戳/发送者/消息内容
             MessageInfo message;
-            message.set_message_id(uuid());
+            // 同一发送者重试同一个 client_message_id 时始终得到相同的服务端消息ID。
+            message.set_message_id(stableMessageId(uid, client_mid));
+            message.set_client_message_id(client_mid);
             message.set_chat_session_id(chat_ssid);
             message.set_timestamp(time(nullptr));
             message.mutable_sender()->CopyFrom(rsp.user_info());

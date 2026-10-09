@@ -11,16 +11,20 @@ class Message {
     public:
         Message(){}
         Message(const std::string &mid,
+            const std::string &client_mid,
             const std::string &ssid,
             const std::string &uid,
             const unsigned char mtype,
             const boost::posix_time::ptime &ctime):
-            _message_id(mid), _session_id(ssid),
+            _message_id(mid), _client_message_id(client_mid), _session_id(ssid),
             _user_id(uid), _message_type(mtype),
             _create_time(ctime){}
         
         std::string message_id() const { return _message_id; }
         void message_id(const std::string &val) { _message_id = val; }
+
+        std::string client_message_id() const { return _client_message_id; }
+        void client_message_id(const std::string &val) { _client_message_id = val; }
 
         std::string session_id() const { return _session_id; }
         void session_id(const std::string &val) { _session_id = val; }
@@ -63,6 +67,8 @@ class Message {
         unsigned long _id;
         #pragma db type("varchar(64)") index unique
         std::string _message_id;
+        #pragma db type("varchar(64)") index unique
+        std::string _client_message_id;         //客户端幂等ID
         #pragma db type("varchar(64)") index
         std::string _session_id;                //所属会话ID
         #pragma db type("varchar(64)")

@@ -6,18 +6,36 @@ namespace bite_im {
 class MessageTable {
     public:
         using ptr = std::shared_ptr<MessageTable>;
+        enum class InsertResult { INSERTED, DUPLICATE, ERROR };
         MessageTable(const std::shared_ptr<odb::core::database> &db): _db(db){}
         ~MessageTable(){}
-        bool insert(Message &msg) {
+        bool existsClientMessage(const std::string &client_message_id) {
+            try {
+                odb::transaction trans(_db->begin());
+                typedef odb::query<Message> query;
+                std::unique_ptr<Message> message(
+                    _db->query_one<Message>(query::client_message_id == client_message_id));
+                trans.commit();
+                return static_cast<bool>(message);
+            } catch (std::exception &e) {
+                LOG_ERROR("查询客户端消息ID失败 {}:{}！", client_message_id, e.what());
+                return false;
+            }
+        }
+        InsertResult insert(Message &msg) {
             try {
                 odb::transaction trans(_db->begin());
                 _db->persist(msg);
                 trans.commit();
             }catch (std::exception &e) {
+                if (existsClientMessage(msg.client_message_id())) {
+                    LOG_INFO("忽略重复消息：{}", msg.client_message_id());
+                    return InsertResult::DUPLICATE;
+                }
                 LOG_ERROR("新增消息失败 {}:{}！", msg.message_id(),e.what());
-                return false;
+                return InsertResult::ERROR;
             }
-            return true;
+            return InsertResult::INSERTED;
         }
         bool remove(const std::string &ssid) {
             try {

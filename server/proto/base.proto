@@ -30,6 +30,14 @@ enum MessageType {
     FILE = 2;
     SPEECH = 3;
 }
+
+enum DeliveryStatus {
+    PENDING = 0;
+    SENT = 1;
+    DELIVERED = 2;
+    READ = 3;
+    FAILED = 4;
+}
 message StringMessageInfo {
     string content = 1;//文字聊天内容
 }
@@ -68,6 +76,7 @@ message MessageInfo {
     int64 timestamp = 3;//消息产生时间
     UserInfo sender = 4;//消息发送者信息
     MessageContent message = 5;
+    string client_message_id = 6;//客户端生成的幂等ID，重试时保持不变
 }
 
 message FileDownloadData {

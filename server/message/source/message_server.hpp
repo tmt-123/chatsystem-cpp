@@ -110,6 +110,7 @@ class MessageServiceImpl : public bite_im::MsgStorageService {
             for (const auto &msg : msg_lists) {
                 auto message_info = response->add_msg_list();
                 message_info->set_message_id(msg.message_id());
+                message_info->set_client_message_id(msg.client_message_id());
                 message_info->set_chat_session_id(msg.session_id());
                 message_info->set_timestamp(boost::posix_time::to_time_t(msg.create_time()));
                 message_info->mutable_sender()->CopyFrom(user_lists[msg.user_id()]);
@@ -197,6 +198,7 @@ class MessageServiceImpl : public bite_im::MsgStorageService {
             for (const auto &msg : msg_lists) {
                 auto message_info = response->add_msg_list();
                 message_info->set_message_id(msg.message_id());
+                message_info->set_client_message_id(msg.client_message_id());
                 message_info->set_chat_session_id(msg.session_id());
                 message_info->set_timestamp(boost::posix_time::to_time_t(msg.create_time()));
                 message_info->mutable_sender()->CopyFrom(user_lists[msg.user_id()]);
@@ -272,6 +274,7 @@ class MessageServiceImpl : public bite_im::MsgStorageService {
             for (const auto &msg : msg_lists) {
                 auto message_info = response->add_msg_list();
                 message_info->set_message_id(msg.message_id());
+                message_info->set_client_message_id(msg.client_message_id());
                 message_info->set_chat_session_id(msg.session_id());
                 message_info->set_timestamp(boost::posix_time::to_time_t(msg.create_time()));
                 message_info->mutable_sender()->CopyFrom(user_lists[msg.user_id()]);
@@ -290,6 +293,14 @@ class MessageServiceImpl : public bite_im::MsgStorageService {
             bool ret = message.ParseFromArray(body, sz);
             if (ret == false) {
                 LOG_ERROR("对消费到的消息进行反序列化失败！");
+                return;
+            }
+            if (message.client_message_id().empty()) {
+                // 兼容升级前仍在队列中的旧消息。
+                message.set_client_message_id(message.message_id());
+            }
+            if (_mysql_message->existsClientMessage(message.client_message_id())) {
+                LOG_INFO("忽略重复消费的消息：{}", message.client_message_id());
                 return;
             }
             //2. 根据不同的消息类型进行不同的处理
@@ -348,7 +359,8 @@ class MessageServiceImpl : public bite_im::MsgStorageService {
                     return;
             }
             //3. 提取消息的元信息，存储到mysql数据库中
-            bite_im::Message msg(message.message_id(), 
+            bite_im::Message msg(message.message_id(),
+                message.client_message_id(),
                 message.chat_session_id(),
                 message.sender().user_id(),
                 message.message().message_type(),
@@ -357,8 +369,8 @@ class MessageServiceImpl : public bite_im::MsgStorageService {
             msg.file_id(file_id);
             msg.file_name(file_name);
             msg.file_size(file_size);
-            ret = _mysql_message->insert(msg);
-            if (ret == false) {
+            auto insert_result = _mysql_message->insert(msg);
+            if (insert_result == MessageTable::InsertResult::ERROR) {
                 LOG_ERROR("向数据库插入新消息失败！");
                 return;
             }

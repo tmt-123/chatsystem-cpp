@@ -9,6 +9,7 @@ DROP TABLE IF EXISTS `message`;
 CREATE TABLE `message` (
   `id` BIGINT UNSIGNED NOT NULL PRIMARY KEY AUTO_INCREMENT,
   `message_id` varchar(64) NOT NULL,
+  `client_message_id` varchar(64) NOT NULL,
   `session_id` varchar(64) NOT NULL,
   `user_id` varchar(64) NOT NULL,
   `message_type` TINYINT UNSIGNED NOT NULL,
@@ -21,6 +22,9 @@ CREATE TABLE `message` (
 
 CREATE UNIQUE INDEX `message_id_i`
   ON `message` (`message_id`);
+
+CREATE UNIQUE INDEX `client_message_id_i`
+  ON `message` (`client_message_id`);
 
 CREATE INDEX `session_id_i`
   ON `message` (`session_id`);
