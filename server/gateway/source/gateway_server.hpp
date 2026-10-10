@@ -174,7 +174,7 @@ namespace bite_im{
                 _redis_status->remove(uid);
                 //3. 移除长连接管理数据
                 _connections->remove(conn);
-                LOG_DEBUG("{} {} {} 长连接断开，清理缓存数据!", ssid, uid, (size_t)conn.get());
+                LOG_DEBUG("用户 {} 长连接断开，清理缓存数据，connection={}", uid, (size_t)conn.get());
             }
             //心跳保活:每 60 秒发一个 WebSocket ping 帧,防止中间路由回收空闲连接
             //连接已关闭则停止递归(递归靠 set_timer 自驱动,非独立定时器线程)
@@ -206,13 +206,13 @@ namespace bite_im{
                 auto uid = _redis_session->uid(ssid);
                 //4. 会话信息不存在则关闭连接
                 if (!uid) {
-                    LOG_ERROR("长连接身份识别失败：未找到会话信息 {}！", ssid);
+                    LOG_ERROR("长连接身份识别失败：未找到会话信息！");
                     _ws_server.close(hdl, websocketpp::close::status::unsupported_data, "未找到会话信息!");
                     return;
                 }
                 //5. 会话信息存在，则添加长连接管理
                 _connections->insert(conn, *uid, ssid);
-                LOG_DEBUG("新增长连接管理：{}-{}-{}", ssid, *uid, (size_t)conn.get());
+                LOG_DEBUG("新增长连接管理：用户={}，connection={}", *uid, (size_t)conn.get());
                 keepAlive(conn);
             }
             //--- 用户管理类 handler(均转发至 UserService) ---
@@ -389,7 +389,7 @@ namespace bite_im{
                 std::string ssid = req.session_id();
                 auto uid = _redis_session->uid(ssid);
                 if (!uid) {
-                    LOG_ERROR("{} 获取登录会话关联用户信息失败！", ssid);
+                    LOG_ERROR("{} 获取登录会话关联用户信息失败！", req.request_id());
                     return err_response("获取登录会话关联用户信息失败！");
                 }
                 req.set_user_id(*uid);
@@ -428,7 +428,7 @@ namespace bite_im{
                 std::string ssid = req.session_id();
                 auto uid = _redis_session->uid(ssid);
                 if (!uid) {
-                    LOG_ERROR("{} 获取登录会话关联用户信息失败！", ssid);
+                    LOG_ERROR("{} 获取登录会话关联用户信息失败！", req.request_id());
                     return err_response("获取登录会话关联用户信息失败！");
                 }
                 req.set_user_id(*uid);
@@ -467,7 +467,7 @@ namespace bite_im{
                 std::string ssid = req.session_id();
                 auto uid = _redis_session->uid(ssid);
                 if (!uid) {
-                    LOG_ERROR("{} 获取登录会话关联用户信息失败！", ssid);
+                    LOG_ERROR("{} 获取登录会话关联用户信息失败！", req.request_id());
                     return err_response("获取登录会话关联用户信息失败！");
                 }
                 req.set_user_id(*uid);
@@ -506,7 +506,7 @@ namespace bite_im{
                 std::string ssid = req.session_id();
                 auto uid = _redis_session->uid(ssid);
                 if (!uid) {
-                    LOG_ERROR("{} 获取登录会话关联用户信息失败！", ssid);
+                    LOG_ERROR("{} 获取登录会话关联用户信息失败！", req.request_id());
                     return err_response("获取登录会话关联用户信息失败！");
                 }
                 req.set_user_id(*uid);
@@ -545,7 +545,7 @@ namespace bite_im{
                 std::string ssid = req.session_id();
                 auto uid = _redis_session->uid(ssid);
                 if (!uid) {
-                    LOG_ERROR("{} 获取登录会话关联用户信息失败！", ssid);
+                    LOG_ERROR("{} 获取登录会话关联用户信息失败！", req.request_id());
                     return err_response("获取登录会话关联用户信息失败！");
                 }
                 req.set_user_id(*uid);
@@ -585,7 +585,7 @@ namespace bite_im{
                 std::string ssid = req.session_id();
                 auto uid = _redis_session->uid(ssid);
                 if (!uid) {
-                    LOG_ERROR("{} 获取登录会话关联用户信息失败！", ssid);
+                    LOG_ERROR("{} 获取登录会话关联用户信息失败！", req.request_id());
                     return err_response("获取登录会话关联用户信息失败！");
                 }
                 req.set_user_id(*uid);
@@ -650,7 +650,7 @@ namespace bite_im{
                 std::string ssid = req.session_id();
                 auto uid = _redis_session->uid(ssid);
                 if (!uid) {
-                    LOG_ERROR("{} 获取登录会话关联用户信息失败！", ssid);
+                    LOG_ERROR("{} 获取登录会话关联用户信息失败！", req.request_id());
                     return err_response("获取登录会话关联用户信息失败！");
                 }
                 req.set_user_id(*uid);
@@ -705,7 +705,7 @@ namespace bite_im{
                 std::string ssid = req.session_id();
                 auto uid = _redis_session->uid(ssid);
                 if (!uid) {
-                    LOG_ERROR("{} 获取登录会话关联用户信息失败！", ssid);
+                    LOG_ERROR("{} 获取登录会话关联用户信息失败！", req.request_id());
                     return err_response("获取登录会话关联用户信息失败！");
                 }
                 req.set_user_id(*uid);
@@ -798,7 +798,7 @@ namespace bite_im{
                 std::string ssid = req.session_id();
                 auto uid = _redis_session->uid(ssid);
                 if (!uid) {
-                    LOG_ERROR("{} 获取登录会话关联用户信息失败！", ssid);
+                    LOG_ERROR("{} 获取登录会话关联用户信息失败！", req.request_id());
                     return err_response("获取登录会话关联用户信息失败！");
                 }
                 req.set_user_id(*uid);
@@ -845,7 +845,7 @@ namespace bite_im{
                 std::string ssid = req.session_id();
                 auto uid = _redis_session->uid(ssid);
                 if (!uid) {
-                    LOG_ERROR("{} 获取登录会话关联用户信息失败！", ssid);
+                    LOG_ERROR("{} 获取登录会话关联用户信息失败！", req.request_id());
                     return err_response("获取登录会话关联用户信息失败！");
                 }
                 req.set_user_id(*uid);
@@ -883,7 +883,7 @@ namespace bite_im{
                 std::string ssid = req.session_id();
                 auto uid = _redis_session->uid(ssid);
                 if (!uid) {
-                    LOG_ERROR("{} 获取登录会话关联用户信息失败！", ssid);
+                    LOG_ERROR("{} 获取登录会话关联用户信息失败！", req.request_id());
                     return err_response("获取登录会话关联用户信息失败！");
                 }
                 req.set_user_id(*uid);
@@ -922,7 +922,7 @@ namespace bite_im{
                 std::string ssid = req.session_id();
                 auto uid = _redis_session->uid(ssid);
                 if (!uid) {
-                    LOG_ERROR("{} 获取登录会话关联用户信息失败！", ssid);
+                    LOG_ERROR("{} 获取登录会话关联用户信息失败！", req.request_id());
                     return err_response("获取登录会话关联用户信息失败！");
                 }
                 req.set_user_id(*uid);
@@ -960,7 +960,7 @@ namespace bite_im{
                 std::string ssid = req.session_id();
                 auto uid = _redis_session->uid(ssid);
                 if (!uid) {
-                    LOG_ERROR("{} 获取登录会话关联用户信息失败！", ssid);
+                    LOG_ERROR("{} 获取登录会话关联用户信息失败！", req.request_id());
                     return err_response("获取登录会话关联用户信息失败！");
                 }
                 req.set_user_id(*uid);
@@ -1000,7 +1000,7 @@ namespace bite_im{
                 std::string ssid = req.session_id();
                 auto uid = _redis_session->uid(ssid);
                 if (!uid) {
-                    LOG_ERROR("{} 获取登录会话关联用户信息失败！", ssid);
+                    LOG_ERROR("{} 获取登录会话关联用户信息失败！", req.request_id());
                     return err_response("获取登录会话关联用户信息失败！");
                 }
                 req.set_user_id(*uid);
@@ -1056,7 +1056,7 @@ namespace bite_im{
                 std::string ssid = req.session_id();
                 auto uid = _redis_session->uid(ssid);
                 if (!uid) {
-                    LOG_ERROR("{} 获取登录会话关联用户信息失败！", ssid);
+                    LOG_ERROR("{} 获取登录会话关联用户信息失败！", req.request_id());
                     return err_response("获取登录会话关联用户信息失败！");
                 }
                 req.set_user_id(*uid);
@@ -1094,7 +1094,7 @@ namespace bite_im{
                 std::string ssid = req.session_id();
                 auto uid = _redis_session->uid(ssid);
                 if (!uid) {
-                    LOG_ERROR("{} 获取登录会话关联用户信息失败！", ssid);
+                    LOG_ERROR("{} 获取登录会话关联用户信息失败！", req.request_id());
                     return err_response("获取登录会话关联用户信息失败！");
                 }
                 req.set_user_id(*uid);
@@ -1132,7 +1132,7 @@ namespace bite_im{
                 std::string ssid = req.session_id();
                 auto uid = _redis_session->uid(ssid);
                 if (!uid) {
-                    LOG_ERROR("{} 获取登录会话关联用户信息失败！", ssid);
+                    LOG_ERROR("{} 获取登录会话关联用户信息失败！", req.request_id());
                     return err_response("获取登录会话关联用户信息失败！");
                 }
                 req.set_user_id(*uid);
@@ -1171,7 +1171,7 @@ namespace bite_im{
                 std::string ssid = req.session_id();
                 auto uid = _redis_session->uid(ssid);
                 if (!uid) {
-                    LOG_ERROR("{} 获取登录会话关联用户信息失败！", ssid);
+                    LOG_ERROR("{} 获取登录会话关联用户信息失败！", req.request_id());
                     return err_response("获取登录会话关联用户信息失败！");
                 }
                 req.set_user_id(*uid);
@@ -1209,7 +1209,7 @@ namespace bite_im{
                 std::string ssid = req.session_id();
                 auto uid = _redis_session->uid(ssid);
                 if (!uid) {
-                    LOG_ERROR("{} 获取登录会话关联用户信息失败！", ssid);
+                    LOG_ERROR("{} 获取登录会话关联用户信息失败！", req.request_id());
                     return err_response("获取登录会话关联用户信息失败！");
                 }
                 req.set_user_id(*uid);
@@ -1247,7 +1247,7 @@ namespace bite_im{
                 std::string ssid = req.session_id();
                 auto uid = _redis_session->uid(ssid);
                 if (!uid) {
-                    LOG_ERROR("{} 获取登录会话关联用户信息失败！", ssid);
+                    LOG_ERROR("{} 获取登录会话关联用户信息失败！", req.request_id());
                     return err_response("获取登录会话关联用户信息失败！");
                 }
                 req.set_user_id(*uid);
@@ -1285,7 +1285,7 @@ namespace bite_im{
                 std::string ssid = req.session_id();
                 auto uid = _redis_session->uid(ssid);
                 if (!uid) {
-                    LOG_ERROR("{} 获取登录会话关联用户信息失败！", ssid);
+                    LOG_ERROR("{} 获取登录会话关联用户信息失败！", req.request_id());
                     return err_response("获取登录会话关联用户信息失败！");
                 }
                 req.set_user_id(*uid);
@@ -1325,7 +1325,7 @@ namespace bite_im{
                 std::string ssid = req.session_id();
                 auto uid = _redis_session->uid(ssid);
                 if (!uid) {
-                    LOG_ERROR("{} 获取登录会话关联用户信息失败！", ssid);
+                    LOG_ERROR("{} 获取登录会话关联用户信息失败！", req.request_id());
                     return err_response("获取登录会话关联用户信息失败！");
                 }
                 req.set_user_id(*uid);
@@ -1357,6 +1357,8 @@ namespace bite_im{
                 auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
                     rsp.set_success(false);
                     rsp.set_errmsg(errmsg);
+                    rsp.set_client_message_id(req.client_message_id());
+                    rsp.set_delivery_status(DeliveryStatus::FAILED);
                     response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
                 };
                 bool ret = req.ParseFromString(request.body);
@@ -1368,7 +1370,7 @@ namespace bite_im{
                 std::string ssid = req.session_id();
                 auto uid = _redis_session->uid(ssid);
                 if (!uid) {
-                    LOG_ERROR("{} 获取登录会话关联用户信息失败！", ssid);
+                    LOG_ERROR("{} 获取登录会话关联用户信息失败！", req.request_id());
                     return err_response("获取登录会话关联用户信息失败！");
                 }
                 req.set_user_id(*uid);
@@ -1386,6 +1388,7 @@ namespace bite_im{
                     return err_response("消息转发子服务调用失败！");
                 }
                 // 4. 若业务处理成功 --- 且获取被申请方长连接成功，则向被申请放进行好友申请事件通知
+                uint32_t delivered_target_count = 0;
                 if (target_rsp.success()){
                     for (int i = 0; i < target_rsp.target_id_list_size(); i++) {
                         std::string notify_uid = target_rsp.target_id_list(i);
@@ -1396,13 +1399,24 @@ namespace bite_im{
                         notify.set_notify_type(NotifyType::CHAT_MESSAGE_NOTIFY);
                         auto msg_info = notify.mutable_new_message_info();
                         msg_info->mutable_message_info()->CopyFrom(target_rsp.message());
-                        conn->send(notify.SerializeAsString(), websocketpp::frame::opcode::value::binary);
+                        try {
+                            conn->send(notify.SerializeAsString(), websocketpp::frame::opcode::value::binary);
+                            ++delivered_target_count;
+                        } catch (const std::exception &e) {
+                            LOG_WARN("{} 消息实时推送失败，目标用户={}：{}", req.request_id(), notify_uid, e.what());
+                        }
                     }
                 }
                 // 5. 向客户端进行响应
                 rsp.set_request_id(req.request_id());
                 rsp.set_success(target_rsp.success());
                 rsp.set_errmsg(target_rsp.errmsg());
+                rsp.set_client_message_id(req.client_message_id());
+                rsp.set_message_id(target_rsp.message().message_id());
+                rsp.set_delivered_target_count(delivered_target_count);
+                rsp.set_delivery_status(target_rsp.success()
+                    ? (delivered_target_count > 0 ? DeliveryStatus::DELIVERED : DeliveryStatus::SENT)
+                    : DeliveryStatus::FAILED);
                 response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
             }
         private:
