@@ -93,7 +93,7 @@ public:
     void getApplyList(const QString& loginSessionId);
     void getRecentMessageList(const QString& loginSessionId, const QString& chatSessionId, bool updateUI);
     void sendMessage(const QString& loginSessionId, const QString& chatSessionId, model::MessageType messageType,
-                     const QByteArray& content, const QString& extraInfo);
+                     const QString& clientMessageId, const QByteArray& content, const QString& extraInfo);
     void receiveMessage(const QString& chatSessionId);
     void changeNickname(const QString& loginSessionId, const QString& nickname);
     void changeDescription(const QString& loginSessionId, const QString& desc);

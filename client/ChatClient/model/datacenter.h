@@ -207,8 +207,11 @@ public:
     void setCurrentChatSessionId(const QString& chatSessionId);
     const QString& getCurrentChatSessionId();
 
-    // 添加消息到 DataCenter 中
-    void addMessage(const Message& message);
+    // 添加消息到 DataCenter 中，重复消息返回 false
+    bool addMessage(const Message& message);
+    // 根据客户端消息 ID 更新服务端 ID 和投递状态
+    void updateMessageStatus(const QString& clientMessageId, const QString& serverMessageId,
+                             DeliveryStatus status, const QString& reason = "");
 
 signals:
     // 自定义信号
@@ -218,7 +221,8 @@ signals:
     void getApplyListDone();
     void getRecentMessageListDone(const QString& chatSessionId);
     void getRecentMessageListDoneNoUI(const QString& chatSessionId);
-    void sendMessageDone(MessageType messageType, const QByteArray& content, const QString& extraInfo);
+    void sendMessagePending(const Message& message);
+    void sendMessageStatusChanged(const QString& clientMessageId, DeliveryStatus status, const QString& reason);
     void updateLastMessage(const QString& chatSessionId);
     void receiveMessageDone(const Message& lastMessage);
     void changeNicknameDone();

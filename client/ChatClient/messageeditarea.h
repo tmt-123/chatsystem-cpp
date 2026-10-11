@@ -16,7 +16,7 @@ public:
 
     void initSignalSlot();
     void sendTextMessage();
-    void addSelfMessage(model::MessageType messageType, const QByteArray& content, const QString& extraInfo);
+    void addSelfMessage(const model::Message& message);
     void addOtherMessage(const model::Message& message);
 
     void clickSendImageBtn();

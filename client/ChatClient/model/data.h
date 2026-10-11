@@ -123,9 +123,18 @@ enum MessageType {
     SPEECH_TYPE 	// 语音消息
 };
 
+enum class DeliveryStatus {
+    PENDING = 0,
+    SENT = 1,
+    DELIVERED = 2,
+    READ = 3,
+    FAILED = 4
+};
+
 class Message {
 public:
     QString messageId = "";				// 消息的编号
+    QString clientMessageId = "";       // 客户端生成的幂等键
     QString chatSessionId = "";			// 消息所属会话的编号
     QString time = "";					// 消息的时间. 通过 "格式化" 时间的方式来表示. 形如 06-07 12:00:00
     MessageType messageType = TEXT_TYPE;// 消息类型
@@ -133,6 +142,8 @@ public:
     QByteArray content;					// 消息的正文内容
     QString fileId = "";				// 文件的身份标识. 当消息类型为 文件, 图片, 语音 的时候, 才有效. 当消息类型为 文本, 则为 ""
     QString fileName = ""; 				// 文件名称. 只是当消息类型为 文件 消息, 才有效. 其他消息均为 ""
+    DeliveryStatus deliveryStatus = DeliveryStatus::SENT;
+    QString deliveryError = "";
 
     // 此处 extraInfo 目前只是在消息类型为文件消息时, 作为 "文件名" 补充.
     static Message makeMessage(MessageType messageType, const QString& chatSessionId, const UserInfo& sender,
@@ -153,6 +164,10 @@ public:
 
     void load(const bite_im::MessageInfo& messageInfo) {
         this->messageId = messageInfo.messageId();
+        this->clientMessageId = messageInfo.clientMessageId();
+        if (this->clientMessageId.isEmpty()) {
+            this->clientMessageId = this->messageId;
+        }
         this->chatSessionId = messageInfo.chatSessionId();
         this->time = formatTime(messageInfo.timestamp());
         this->sender.load(messageInfo.sender());
@@ -194,15 +209,15 @@ public:
     }
 
 private:
-    // 通过这个方法生成唯一的 messageId
+    // 生成跨重试保持不变的客户端消息 ID
     static QString makeId() {
-        return "M" + QUuid::createUuid().toString().sliced(25, 12);
+        return "C" + QUuid::createUuid().toString(QUuid::WithoutBraces);
     }
 
     static Message makeTextMessage(const QString& chatSessionId, const UserInfo& sender, const QByteArray& content) {
         Message message;
-        // 此处需要确保, 设置的 messageId 是 "唯一" 的
-        message.messageId = makeId();
+        message.clientMessageId = makeId();
+        message.deliveryStatus = DeliveryStatus::PENDING;
         message.chatSessionId = chatSessionId;
         message.sender = sender;
         message.time = formatTime(getTime()); // 生成一个格式化时间
@@ -216,7 +231,8 @@ private:
 
     static Message makeImageMessage(const QString& chatSessionId, const UserInfo& sender, const QByteArray& content) {
         Message message;
-        message.messageId = makeId();
+        message.clientMessageId = makeId();
+        message.deliveryStatus = DeliveryStatus::PENDING;
         message.chatSessionId = chatSessionId;
         message.sender = sender;
         message.time = formatTime(getTime());
@@ -231,7 +247,8 @@ private:
 
     static Message makeFileMessage(const QString& chatSessionId, const UserInfo& sender, const QByteArray& content, const QString& fileName) {
         Message message;
-        message.messageId = makeId();
+        message.clientMessageId = makeId();
+        message.deliveryStatus = DeliveryStatus::PENDING;
         message.chatSessionId = chatSessionId;
         message.sender = sender;
         message.time = formatTime(getTime());
@@ -245,7 +262,8 @@ private:
 
     static Message makeSpeechMessage(const QString& chatSessionId, const UserInfo& sender, const QByteArray& content) {
         Message message;
-        message.messageId = makeId();
+        message.clientMessageId = makeId();
+        message.deliveryStatus = DeliveryStatus::PENDING;
         message.chatSessionId = chatSessionId;
         message.sender = sender;
         message.time = formatTime(getTime());

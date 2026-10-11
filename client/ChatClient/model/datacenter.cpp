@@ -132,7 +132,7 @@ void DataCenter::loadDataFile()
 
     QJsonObject jsonObj = jsonDoc.object();
     this->loginSessionId = jsonObj["loginSessionId"].toString();
-    LOG() << "loginSessionId=" << this->loginSessionId;
+    LOG() << "已加载本地登录态";
 
     this->unreadMessageCount->clear();
     QJsonObject jsonUnread = jsonObj["unread"].toObject();
@@ -301,22 +301,50 @@ void DataCenter::resetRecentMessageList(const QString &chatSessionId, std::share
 
 void DataCenter::sendTextMessageAsync(const QString &chatSessionId, const QString &content)
 {
-    netClient.sendMessage(loginSessionId, chatSessionId, MessageType::TEXT_TYPE, content.toUtf8(), "");
+    if (myself == nullptr) {
+        return;
+    }
+    Message message = Message::makeMessage(MessageType::TEXT_TYPE, chatSessionId, *myself, content.toUtf8(), "");
+    addMessage(message);
+    emit sendMessagePending(message);
+    netClient.sendMessage(loginSessionId, chatSessionId, MessageType::TEXT_TYPE,
+                          message.clientMessageId, content.toUtf8(), "");
 }
 
 void DataCenter::sendImageMessageAsync(const QString &chatSessionId, const QByteArray &content)
 {
-    netClient.sendMessage(loginSessionId, chatSessionId, MessageType::IMAGE_TYPE, content, "");
+    if (myself == nullptr) {
+        return;
+    }
+    Message message = Message::makeMessage(MessageType::IMAGE_TYPE, chatSessionId, *myself, content, "");
+    addMessage(message);
+    emit sendMessagePending(message);
+    netClient.sendMessage(loginSessionId, chatSessionId, MessageType::IMAGE_TYPE,
+                          message.clientMessageId, content, "");
 }
 
 void DataCenter::sendFileMessageAsync(const QString &chatSessionId, const QString &fileName, const QByteArray &content)
 {
-    netClient.sendMessage(loginSessionId, chatSessionId, MessageType::FILE_TYPE, content, fileName);
+    if (myself == nullptr) {
+        return;
+    }
+    Message message = Message::makeMessage(MessageType::FILE_TYPE, chatSessionId, *myself, content, fileName);
+    addMessage(message);
+    emit sendMessagePending(message);
+    netClient.sendMessage(loginSessionId, chatSessionId, MessageType::FILE_TYPE,
+                          message.clientMessageId, content, fileName);
 }
 
 void DataCenter::sendSpeechMessageAsync(const QString &chatSessionid, const QByteArray &content)
 {
-    netClient.sendMessage(loginSessionId, chatSessionid, MessageType::SPEECH_TYPE, content, "");
+    if (myself == nullptr) {
+        return;
+    }
+    Message message = Message::makeMessage(MessageType::SPEECH_TYPE, chatSessionid, *myself, content, "");
+    addMessage(message);
+    emit sendMessagePending(message);
+    netClient.sendMessage(loginSessionId, chatSessionid, MessageType::SPEECH_TYPE,
+                          message.clientMessageId, content, "");
 }
 
 void DataCenter::changeNicknameAsync(const QString &nickname)
@@ -657,10 +685,62 @@ const QString &DataCenter::getCurrentChatSessionId()
     return this->currentChatSessionId;
 }
 
-void DataCenter::addMessage(const Message &message)
+bool DataCenter::addMessage(const Message &message)
 {
     QList<Message>& messageList = (*recentMessages)[message.chatSessionId];
+    for (Message& existing : messageList) {
+        const bool sameServerId = !message.messageId.isEmpty() && existing.messageId == message.messageId;
+        const bool sameClientId = !message.clientMessageId.isEmpty()
+                && existing.clientMessageId == message.clientMessageId;
+        if (!sameServerId && !sameClientId) {
+            continue;
+        }
+
+        // WebSocket 通知可能比 HTTP ACK 先到，用服务端数据补全本地的 pending 消息。
+        if (existing.messageId.isEmpty()) {
+            existing.messageId = message.messageId;
+        }
+        if (existing.deliveryStatus == DeliveryStatus::PENDING
+                || existing.deliveryStatus == DeliveryStatus::FAILED) {
+            existing.deliveryStatus = DeliveryStatus::DELIVERED;
+            existing.deliveryError.clear();
+            emit sendMessageStatusChanged(existing.clientMessageId, existing.deliveryStatus, "");
+        }
+        return false;
+    }
     messageList.push_back(message);
+    return true;
+}
+
+void DataCenter::updateMessageStatus(const QString &clientMessageId, const QString &serverMessageId,
+                                     DeliveryStatus status, const QString &reason)
+{
+    if (recentMessages == nullptr || clientMessageId.isEmpty()) {
+        return;
+    }
+
+    for (auto it = recentMessages->begin(); it != recentMessages->end(); ++it) {
+        for (Message& message : it.value()) {
+            if (message.clientMessageId != clientMessageId) {
+                continue;
+            }
+            if (!serverMessageId.isEmpty()) {
+                message.messageId = serverMessageId;
+            }
+            // 避免迟到的 HTTP 失败/成功回调覆盖更新的 WebSocket 送达状态。
+            const bool canFail = status == DeliveryStatus::FAILED
+                    && message.deliveryStatus == DeliveryStatus::PENDING;
+            const bool canAdvance = status != DeliveryStatus::FAILED
+                    && (message.deliveryStatus == DeliveryStatus::FAILED
+                        || static_cast<int>(status) >= static_cast<int>(message.deliveryStatus));
+            if (canFail || canAdvance) {
+                message.deliveryStatus = status;
+                message.deliveryError = reason;
+            }
+            emit sendMessageStatusChanged(clientMessageId, message.deliveryStatus, message.deliveryError);
+            return;
+        }
+    }
 }
 
 

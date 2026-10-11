@@ -123,7 +123,9 @@ void NetClient::handleWsMessage(const model::Message &message)
         dataCenter->getRecentMessageListAsync(message.chatSessionId, false);
     } else {
         // 2. 如果当前这个消息所属的会话, 里面的消息已经在本地加载了, 直接把这个消息尾插到消息列表中即可.
-        messageList->push_back(message);
+        if (!dataCenter->addMessage(message)) {
+            return;
+        }
         this->receiveMessage(message.chatSessionId);
     }
 }
@@ -190,7 +192,7 @@ void NetClient::sendAuth()
     req.setSessionId(dataCenter->getLoginSessionId());
     QByteArray body = req.serialize(&serializer);
     websocketClient.sendBinaryMessage(body);
-    LOG() << "[WS身份认证] requestId=" << req.requestId() << ", loginSessionId=" << req.sessionId();
+    LOG() << "[WS身份认证] requestId=" << req.requestId();
 }
 
 /////////////////////////////////////////////////////////////////////////////////
@@ -223,7 +225,7 @@ void NetClient::getMyself(const QString &loginSessionId)
     req.setRequestId(makeRequestId());
     req.setSessionId(loginSessionId);
     QByteArray body = req.serialize(&serializer);
-    LOG() << "[获取个人信息] 发送请求 requestId=" << req.requestId() << ", loginSessionId=" << loginSessionId;
+    LOG() << "[获取个人信息] 发送请求 requestId=" << req.requestId();
 
     // 2. 构造出 HTTP 请求, 并发送出去.
     QNetworkReply* httpResp = sendHttpRequest("/service/user/get_user_info", body);
@@ -259,7 +261,7 @@ void NetClient::getFriendList(const QString& loginSessionId)
     req.setRequestId(makeRequestId());
     req.setSessionId(loginSessionId);
     QByteArray body = req.serialize(&serializer);
-    LOG() << "[获取好友列表] 发送请求 requestId=" << req.requestId() << ", loginSessionId=" << loginSessionId;
+    LOG() << "[获取好友列表] 发送请求 requestId=" << req.requestId();
 
     // 2. 发送 HTTP 请求
     QNetworkReply* httpResp = this->sendHttpRequest("/service/friend/get_friend_list", body);
@@ -295,7 +297,7 @@ void NetClient::getChatSessionList(const QString &loginSessionId)
     req.setRequestId(makeRequestId());
     req.setSessionId(loginSessionId);
     QByteArray body = req.serialize(&serializer);
-    LOG() << "[获取会话列表] 发送请求 requestId=" << req.requestId() << ", loginSessionId=" << loginSessionId;
+    LOG() << "[获取会话列表] 发送请求 requestId=" << req.requestId();
 
     // 2. 发送 HTTP 请求
     QNetworkReply* resp = this->sendHttpRequest("/service/friend/get_chat_session_list", body);
@@ -331,7 +333,7 @@ void NetClient::getApplyList(const QString &loginSessionId)
     req.setRequestId(makeRequestId());
     req.setSessionId(loginSessionId);
     QByteArray body = req.serialize(&serializer);
-    LOG() << "[获取好友申请列表] 发送请求 requestId=" << req.requestId() << ", loginSessionId=" << loginSessionId;
+    LOG() << "[获取好友申请列表] 发送请求 requestId=" << req.requestId();
 
     // 2. 发送 http 请求
     QNetworkReply* resp = this->sendHttpRequest("/service/friend/get_pending_friend_events", body);
@@ -369,7 +371,8 @@ void NetClient::getRecentMessageList(const QString &loginSessionId, const QStrin
     req.setMsgCount(50);	// 此处固定获取最近 50 条记录
     req.setSessionId(loginSessionId);
     QByteArray body = req.serialize(&serializer);
-    LOG() << "[获取最近消息] 发送请求 requestId=" << req.requestId() << ", loginSessionId=" << loginSessionId << ", chatSessionId=" << chatSessionId;
+    LOG() << "[获取最近消息] 发送请求 requestId=" << req.requestId()
+          << ", chatSessionId=" << chatSessionId;
 
     // 2. 发送 http 请求
     QNetworkReply* resp = this->sendHttpRequest("/service/message_storage/get_recent", body);
@@ -402,13 +405,14 @@ void NetClient::getRecentMessageList(const QString &loginSessionId, const QStrin
 // 此处的 extraInfo, 可以用来传递 "扩展信息" . 尤其是对于文件消息来说, 通过这个字段表示 "文件名"
 // 其他类型的消息暂时不涉及, 就直接设为 "". 如果后续有消息类型需要, 都可以给这个参数, 赋予一定的特殊含义.
 void NetClient::sendMessage(const QString &loginSessionId, const QString &chatSessionId, MessageType messageType,
-                            const QByteArray &content, const QString& extraInfo)
+                            const QString &clientMessageId, const QByteArray &content, const QString& extraInfo)
 {
     // 1. 通过 protobuf 构造 body
     bite_im::NewMessageReq pbReq;
     pbReq.setRequestId(makeRequestId());
     pbReq.setSessionId(loginSessionId);
     pbReq.setChatSessionId(chatSessionId);
+    pbReq.setClientMessageId(clientMessageId);
 
     // 构造 MessageContent
     bite_im::MessageContent messageContent;
@@ -448,7 +452,7 @@ void NetClient::sendMessage(const QString &loginSessionId, const QString &chatSe
 
     // 序列化
     QByteArray body = pbReq.serialize(&serializer);
-    LOG() << "[发送消息] 发送请求 requestId=" << pbReq.requestId() << ", loginSessionId=" << pbReq.sessionId()
+    LOG() << "[发送消息] 发送请求 requestId=" << pbReq.requestId()
           << ", chatSessionId=" << pbReq.chatSessionId() << ", messageType=" << pbReq.message().messageType();
 
     // 2. 发送 HTTP 请求
@@ -464,15 +468,15 @@ void NetClient::sendMessage(const QString &loginSessionId, const QString &chatSe
         // b) 判定响应是否正确
         if (!ok) {
             LOG() << "[发送消息] 处理出错! reason=" << reason;
+            dataCenter->updateMessageStatus(clientMessageId, "", DeliveryStatus::FAILED, reason);
             return;
         }
 
-        // c) 此处只是需要记录 "成功失败" , 不需要把内容写入到 DataCenter 中.
+        // c) 将服务端 ACK 回写到发送前已经插入的本地消息。
+        DeliveryStatus status = static_cast<DeliveryStatus>(static_cast<int>(pbResp->deliveryStatus()));
+        dataCenter->updateMessageStatus(clientMessageId, pbResp->messageId(), status, "");
 
-        // d) 通知调用者, 响应处理完毕
-        emit dataCenter->sendMessageDone(messageType, content, extraInfo);
-
-        // e) 打印日志
+        // d) 打印日志
         LOG() << "[发送消息] 响应处理完毕! requestId=" << pbResp->requestId();
     });
 }
@@ -505,8 +509,7 @@ void NetClient::changeNickname(const QString &loginSessionId, const QString &nic
     pbReq.setSessionId(loginSessionId);
     pbReq.setNickname(nickname);
     QByteArray body = pbReq.serialize(&serializer);
-    LOG() << "[修改用户昵称] 发送请求 requestId=" << pbReq.requestId() << ", loginSessionId=" << pbReq.sessionId()
-          << ", nickname=" << pbReq.nickname();
+    LOG() << "[修改用户昵称] 发送请求 requestId=" << pbReq.requestId();
 
     // 2. 发送 http 请求
     QNetworkReply* resp = this->sendHttpRequest("/service/user/set_nickname", body);
@@ -543,8 +546,7 @@ void NetClient::changeDescription(const QString &loginSessionId, const QString &
     pbReq.setSessionId(loginSessionId);
     pbReq.setDescription(desc);
     QByteArray body = pbReq.serialize(&serializer);
-    LOG() << "[修改签名] 发送请求 requestId=" << pbReq.requestId() << ", loginSessisonId=" << pbReq.sessionId()
-          << ", desc=" << pbReq.description();
+    LOG() << "[修改签名] 发送请求 requestId=" << pbReq.requestId();
 
     // 2. 发送 http 请求
     QNetworkReply* resp = this->sendHttpRequest("/service/user/set_description", body);
@@ -580,7 +582,7 @@ void NetClient::getVerifyCode(const QString &phone)
     pbReq.setRequestId(makeRequestId());
     pbReq.setPhoneNumber(phone);
     QByteArray body = pbReq.serialize(&serializer);
-    LOG() << "[获取手机验证码] 发送请求 requestId=" << pbReq.requestId() << ", phone=" << phone;
+    LOG() << "[获取手机验证码] 发送请求 requestId=" << pbReq.requestId();
 
     // 2. 发送 HTTP 请求
     QNetworkReply* resp = this->sendHttpRequest("/service/user/get_phone_verify_code", body);
@@ -619,8 +621,7 @@ void NetClient::changePhone(const QString &loginSessionId, const QString &phone,
     pbReq.setPhoneVerifyCodeId(verifyCodeId);
     pbReq.setPhoneVerifyCode(verifyCode);
     QByteArray body = pbReq.serialize(&serializer);
-    LOG() << "[修改手机号] 发送请求 requestId=" << pbReq.requestId() << ", loginSessionId=" << pbReq.sessionId()
-          << ", phone=" << pbReq.phoneNumber() << ", verifyCodeId=" << pbReq.phoneVerifyCodeId() << ", verifyCode=" << pbReq.phoneVerifyCode();
+    LOG() << "[修改手机号] 发送请求 requestId=" << pbReq.requestId();
 
     // 2. 发送 http 请求
     QNetworkReply* resp = this->sendHttpRequest("/service/user/set_phone", body);
@@ -657,7 +658,7 @@ void NetClient::changeAvatar(const QString &loginSessionId, const QByteArray &av
     pbReq.setSessionId(loginSessionId);
     pbReq.setAvatar(avatar);
     QByteArray body = pbReq.serialize(&serializer);
-    LOG() << "[修改头像] 发送请求 requestId=" << pbReq.requestId() << ", loginSessionId=" << pbReq.sessionId();
+    LOG() << "[修改头像] 发送请求 requestId=" << pbReq.requestId();
 
     // 2. 发送 HTTP 请求
     QNetworkReply* resp = this->sendHttpRequest("/service/user/set_avatar", body);
@@ -694,7 +695,7 @@ void NetClient::deleteFriend(const QString &loginSessionId, const QString &userI
     pbReq.setSessionId(loginSessionId);
     pbReq.setPeerId(userId);
     QByteArray body = pbReq.serialize(&serializer);
-    LOG() << "[删除好友] 发送请求 requestId=" << pbReq.requestId() << ", loginSessionId=" << pbReq.sessionId()
+    LOG() << "[删除好友] 发送请求 requestId=" << pbReq.requestId()
           << ", peerId=" << pbReq.peerId();
 
     // 2. 发送 HTTP 请求
@@ -732,7 +733,7 @@ void NetClient::addFriendApply(const QString &loginSessionId, const QString &use
     pbReq.setSessionId(loginSessionId);
     pbReq.setRespondentId(userId);
     QByteArray body = pbReq.serialize(&serializer);
-    LOG() << "[添加好友申请] 发送请求 requestId=" << pbReq.requestId() << ", loginSessionId=" << pbReq.sessionId()
+    LOG() << "[添加好友申请] 发送请求 requestId=" << pbReq.requestId()
           << ", userId=" << userId;
 
     // 2. 发送 HTTP 请求
@@ -770,7 +771,7 @@ void NetClient::acceptFriendApply(const QString &loginSessionId, const QString &
     pbReq.setAgree(true);
     pbReq.setApplyUserId(userId);
     QByteArray body = pbReq.serialize(&serializer);
-    LOG() << "[同意好友申请] 发送请求 requestId=" << pbReq.requestId() << ", loginSessionId=" << pbReq.sessionId()
+    LOG() << "[同意好友申请] 发送请求 requestId=" << pbReq.requestId()
           << ", userId=" << pbReq.applyUserId();
 
     // 2. 发送 HTTP 请求
@@ -813,7 +814,7 @@ void NetClient::rejectFriendApply(const QString &loginSessionId, const QString &
     pbReq.setAgree(false);
     pbReq.setApplyUserId(userId);
     QByteArray body = pbReq.serialize(&serializer);
-    LOG() << "[拒绝好友申请] 发送请求 requestId=" << pbReq.requestId() << ", loginSessionId=" << pbReq.sessionId()
+    LOG() << "[拒绝好友申请] 发送请求 requestId=" << pbReq.requestId()
           << ", userId=" << pbReq.applyUserId();
 
     // 2. 发送 HTTP 请求
@@ -852,7 +853,7 @@ void NetClient::createGroupChatSession(const QString &loginSessionId, const QLis
     pbReq.setChatSessionName("新的群聊");
     pbReq.setMemberIdList(userIdList);
     QByteArray body = pbReq.serialize(&serializer);
-    LOG() << "[创建群聊会话] 发送请求 requestId=" << pbReq.requestId() << ", loginSessionId=" << loginSessionId
+    LOG() << "[创建群聊会话] 发送请求 requestId=" << pbReq.requestId()
           << ", userIdList=" << userIdList;
 
     // 2. 发送 HTTP 请求
@@ -890,7 +891,7 @@ void NetClient::getMemberList(const QString &loginSessionId, const QString &chat
     pbReq.setSessionId(loginSessionId);
     pbReq.setChatSessionId(chatSessionId);
     QByteArray body = pbReq.serialize(&serializer);
-    LOG() << "[获取会话成员列表] 发送请求 requestId=" << pbReq.requestId() << ", loginSessionId=" << pbReq.sessionId()
+    LOG() << "[获取会话成员列表] 发送请求 requestId=" << pbReq.requestId()
           << ", chatSessionId=" << pbReq.chatSessionId();
 
     // 2. 发送 HTTP 请求
@@ -928,8 +929,7 @@ void NetClient::searchUser(const QString &loginSessionId, const QString &searchK
     pbReq.setSessionId(loginSessionId);
     pbReq.setSearchKey(searchKey);
     QByteArray body = pbReq.serialize(&serializer);
-    LOG() << "[搜索用户] 发送请求 requestId=" << pbReq.requestId() << ", loginSessionId=" << loginSessionId
-          << ", searchKey=" << searchKey;
+    LOG() << "[搜索用户] 发送请求 requestId=" << pbReq.requestId();
 
     // 2. 发送 HTTP 请求
     QNetworkReply* resp = this->sendHttpRequest("/service/friend/search_friend", body);
@@ -967,8 +967,8 @@ void NetClient::searchMessage(const QString &loginSessionId, const QString &chat
     pbReq.setChatSessionId(chatSessionId);
     pbReq.setSearchKey(searchKey);
     QByteArray body = pbReq.serialize(&serializer);
-    LOG() << "[按关键词搜索历史消息] 发送请求 requestId=" << pbReq.requestId() << ", loginSessionId=" << pbReq.sessionId()
-          << ", chatSessionId=" << pbReq.chatSessionId() << ", searchKey=" << searchKey;
+    LOG() << "[按关键词搜索历史消息] 发送请求 requestId=" << pbReq.requestId()
+          << ", chatSessionId=" << pbReq.chatSessionId();
 
     // 2. 发送 HTTP 请求
     QNetworkReply* resp = this->sendHttpRequest("/service/message_storage/search_history", body);
@@ -1007,7 +1007,7 @@ void NetClient::searchMessageByTime(const QString &loginSessionId, const QString
     pbReq.setStartTime(begTime.toSecsSinceEpoch());
     pbReq.setOverTime(endTime.toSecsSinceEpoch());
     QByteArray body = pbReq.serialize(&serializer);
-    LOG() << "[按时间搜索历史消息] 发送请求 requestId=" << pbReq.requestId() << ", loginSessionId=" << loginSessionId
+    LOG() << "[按时间搜索历史消息] 发送请求 requestId=" << pbReq.requestId()
           << ", chatSessionId=" << chatSessionId << ", begTime=" << begTime << ", endTime=" << endTime;
 
     // 2. 发送 HTTP 请求
@@ -1047,7 +1047,7 @@ void NetClient::userLogin(const QString &username, const QString &password)
     pbReq.setVerifyCodeId("");
     pbReq.setVerifyCode("");
     QByteArray body = pbReq.serialize(&serializer);
-    LOG() << "[用户名登录] 发送请求 requestId=" << pbReq.requestId() << ", username=" << pbReq.nickname() << ", password=" << pbReq.password();
+    LOG() << "[用户名登录] 发送请求 requestId=" << pbReq.requestId();
 
     // 2. 发送 HTTP 请求
     QNetworkReply* resp = this->sendHttpRequest("/service/user/username_login", body);
@@ -1087,7 +1087,7 @@ void NetClient::userRegister(const QString &username, const QString &password)
     pbReq.setVerifyCodeId("");
     pbReq.setVerifyCode("");
     QByteArray body = pbReq.serialize(&serializer);
-    LOG() << "[用户名注册] 发送请求 requestId=" << pbReq.requestId() << ", username=" << pbReq.nickname() << ", password=" << pbReq.password();
+    LOG() << "[用户名注册] 发送请求 requestId=" << pbReq.requestId();
 
     // 2. 发送 HTTP 请求
     QNetworkReply* resp = this->sendHttpRequest("/service/user/username_register", body);
@@ -1126,8 +1126,7 @@ void NetClient::phoneLogin(const QString &phone, const QString &verifyCodeId, co
     pbReq.setVerifyCodeId(verifyCodeId);
     pbReq.setVerifyCode(verifyCode);
     QByteArray body = pbReq.serialize(&serializer);
-    LOG() << "[手机号登录] 发送请求 requestId=" << pbReq.requestId() << ", phone=" << pbReq.phoneNumber()
-          << ", verifyCodeId=" << pbReq.verifyCodeId() << ", verifyCode=" << pbReq.verifyCode();
+    LOG() << "[手机号登录] 发送请求 requestId=" << pbReq.requestId();
 
     // 2. 发送 HTTP 请求
     QNetworkReply* resp = this->sendHttpRequest("/service/user/phone_login", body);
@@ -1165,8 +1164,7 @@ void NetClient::phoneRegister(const QString& phone, const QString& verifyCodeId,
     pbReq.setVerifyCodeId(verifyCodeId);
     pbReq.setVerifyCode(verifyCode);
     QByteArray body = pbReq.serialize(&serializer);
-    LOG() << "[手机号注册] 发送请求 requestId=" << pbReq.requestId() << ", phone=" << pbReq.phoneNumber()
-          << ", verifyCodeId=" << pbReq.verifyCodeId() << ", verifyCode=" << pbReq.verifyCode();
+    LOG() << "[手机号注册] 发送请求 requestId=" << pbReq.requestId();
 
     // 2. 发送 HTTP 请求
     QNetworkReply* resp = this->sendHttpRequest("/service/user/phone_register", body);
@@ -1241,7 +1239,7 @@ void NetClient::speechConvertText(const QString &loginSessionId, const QString &
     pbReq.setSessionId(loginSessionId);
     pbReq.setSpeechContent(content);
     QByteArray body = pbReq.serialize(&serializer);
-    LOG() << "[语音转文字] 发送请求 requestId=" << pbReq.requestId() << ", loginSessonId=" << pbReq.sessionId();
+    LOG() << "[语音转文字] 发送请求 requestId=" << pbReq.requestId();
 
     // 2. 发送 HTTP 请求
     QNetworkReply* resp = this->sendHttpRequest("/service/speech/recognition", body);

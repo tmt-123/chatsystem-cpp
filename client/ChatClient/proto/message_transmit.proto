@@ -18,11 +18,16 @@ message NewMessageReq {
     optional string session_id = 3;
     string chat_session_id = 4;
     MessageContent message = 5;
+    string client_message_id = 6;
 }
 message NewMessageRsp {
     string request_id = 1;
     bool success = 2;
-    string errmsg = 3; 
+    string errmsg = 3;
+    string client_message_id = 4;
+    string message_id = 5;
+    DeliveryStatus delivery_status = 6;
+    uint32 delivered_target_count = 7;
 }
 
 //这个用于内部的通信,生成完整的消息信息，并获取消息的转发人员列表

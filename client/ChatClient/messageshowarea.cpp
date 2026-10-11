@@ -20,6 +20,33 @@
 
 using namespace model;
 
+static void updateDeliveryLabel(QLabel* label, DeliveryStatus status, const QString& reason = "")
+{
+    QString text;
+    QString color = "rgb(150, 150, 150)";
+    switch (status) {
+    case DeliveryStatus::PENDING:
+        text = "发送中…";
+        break;
+    case DeliveryStatus::SENT:
+        text = "已发送";
+        break;
+    case DeliveryStatus::DELIVERED:
+        text = "已送达";
+        break;
+    case DeliveryStatus::READ:
+        text = "已读";
+        break;
+    case DeliveryStatus::FAILED:
+        text = "发送失败";
+        color = "rgb(220, 65, 65)";
+        break;
+    }
+    label->setText(text);
+    label->setStyleSheet(QString("QLabel { font-size: 11px; color: %1; }").arg(color));
+    label->setToolTip(reason);
+}
+
 ////////////////////////////////////////////////////////
 /// 表示消息展示区
 ////////////////////////////////////////////////////////
@@ -181,6 +208,15 @@ MessageItem *MessageItem::makeMessageItem(bool isLeft, const Message &message)
         layout->addWidget(contentWidget, 1, 0);
     }
 
+    // 自己的消息显示 pending / sent / delivered / read / failed 状态。
+    QLabel* deliveryLabel = nullptr;
+    if (!isLeft) {
+        deliveryLabel = new QLabel();
+        deliveryLabel->setAlignment(Qt::AlignRight | Qt::AlignTop);
+        updateDeliveryLabel(deliveryLabel, message.deliveryStatus, message.deliveryError);
+        layout->addWidget(deliveryLabel, 2, 0, Qt::AlignRight);
+    }
+
     // 5. 连接信号槽, 处理用户点击头像的操作
     connect(avatarBtn, &QPushButton::clicked, messageItem, [=]() {
         MainWidget* mainWidget = MainWidget::getInstance();
@@ -199,6 +235,14 @@ MessageItem *MessageItem::makeMessageItem(bool isLeft, const Message &message)
         connect(dataCenter, &DataCenter::changeAvatarDone, messageItem, [=]() {
             UserInfo* myself = dataCenter->getMyself();
             avatarBtn->setIcon(myself->avatar);
+        });
+
+        const QString clientMessageId = message.clientMessageId;
+        connect(dataCenter, &DataCenter::sendMessageStatusChanged, messageItem,
+                [=](const QString& changedId, DeliveryStatus status, const QString& reason) {
+            if (changedId == clientMessageId) {
+                updateDeliveryLabel(deliveryLabel, status, reason);
+            }
         });
     }
 

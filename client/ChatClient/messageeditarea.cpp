@@ -109,7 +109,7 @@ void MessageEditArea::initSignalSlot()
 
     // 2. 关联 "发送文本消息" 信号槽
     connect(sendTextBtn, &QPushButton::clicked, this, &MessageEditArea::sendTextMessage);
-    connect(dataCenter, &DataCenter::sendMessageDone, this, &MessageEditArea::addSelfMessage);
+    connect(dataCenter, &DataCenter::sendMessagePending, this, &MessageEditArea::addSelfMessage);
 
     // 3. 关联 "收到消息" 信号槽
     connect(dataCenter, &DataCenter::receiveMessageDone, this, &MessageEditArea::addOtherMessage);
@@ -154,24 +154,20 @@ void MessageEditArea::sendTextMessage()
 }
 
 // 针对自己发送消息的操作, 做处理. 把自己发的消息, 显示到界面上
-void MessageEditArea::addSelfMessage(MessageType messageType, const QByteArray &content, const QString &extraInfo)
+void MessageEditArea::addSelfMessage(const Message &message)
 {
     DataCenter* dataCenter = DataCenter::getInstance();
-    const QString& currentChatSessionId = dataCenter->getCurrentChatSessionId();
+    const QString& currentChatSessionId = message.chatSessionId;
 
-    // 1. 构造出一个消息对象
-    Message message = Message::makeMessage(messageType, currentChatSessionId, *dataCenter->getMyself(), content, extraInfo);
-    dataCenter->addMessage(message);
-
-    // 2. 把这个新的消息, 显示到消息展示区
+    // 1. 消息已由 DataCenter 以 pending 状态落入内存，立即显示到消息区。
     MainWidget* mainWidget = MainWidget::getInstance();
     MessageShowArea* messageShowArea = mainWidget->getMessageShowArea();
     messageShowArea->addMessage(false, message);
 
-    // 3. 控制消息显示区, 滚动条, 滚动到末尾.
+    // 2. 控制消息显示区, 滚动条, 滚动到末尾.
     messageShowArea->scrollToEnd();
 
-    // 4. 发送信号, 通知会话列表, 更新最后一条消息
+    // 3. 发送信号, 通知会话列表, 更新最后一条消息
     emit dataCenter->updateLastMessage(currentChatSessionId);
 }
 
