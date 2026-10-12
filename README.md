@@ -14,6 +14,8 @@
 - 文本、图片、文件和语音消息
 - 历史消息、最近消息和消息搜索
 - WebSocket 实时消息通知
+- 客户端消息 ID 与服务端幂等持久化，避免重试导致重复消息
+- 消息发送状态（发送中、已发送、已送达、失败）与本地消息去重
 - 文件存储与语音识别
 - 基于 etcd 的服务注册与发现
 
@@ -171,6 +173,15 @@ bash depends.sh
 
 > 不要把真实密钥、令牌或生产密码提交到 Git。推荐使用环境变量、Docker Secrets 或独立的私有配置文件注入敏感信息。
 
+已有数据库升级到新版时，需要执行一次迁移脚本：
+
+```bash
+mysql -u root -p < server/sql/migrations/001_password_hash.sql
+mysql -u root -p < server/sql/migrations/002_message_idempotency.sql
+```
+
+新建数据库直接使用 `server/sql/` 下的初始化脚本即可。历史明文密码会在用户下一次成功登录时自动升级为 PBKDF2-SHA256 哈希。
+
 ## 使用 Docker Compose 启动
 
 完成服务端构建和配置后：
@@ -229,6 +240,7 @@ const QString WEBSOCKET_URL = "ws://127.0.0.1:8001/ws";
 
 ## 安全说明
 
+- 用户名密码使用随机盐和 PBKDF2-SHA256 存储，日志不记录密码、验证码、手机号或登录会话令牌。
 - 仓库中的默认中间件密码仅适用于本地开发，请勿直接用于公网环境。
 - 曾经提交或公开过的云平台密钥应立即吊销并重新创建，仅从 Git 历史中删除并不能保证密钥安全。
 - 生产环境应启用 HTTPS/WSS、访问鉴权、限流和审计日志。
