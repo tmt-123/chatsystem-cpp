@@ -25,6 +25,7 @@
 #include "utils.hpp"    // 基础工具接口
 #include "channel.hpp"  // 信道管理模块封装(发现并选择文件/用户子服务节点)
 #include "rabbitmq.hpp" // RabbitMQ客户端封装(消费Transmute发布的消息做持久化)
+#include "message_persistence.hpp"
 
 //--------------- protobuf协议契约 ---------------
 #include "message.pb.h"  // protobuf框架代码 - 本服务协议(MsgStorageService)
@@ -285,95 +286,39 @@ class MessageServiceImpl : public bite_im::MsgStorageService {
         }
         //RabbitMQ消息消费回调:Transmute子服务发来的每条新消息都会触发本方法
         //职责:把新消息持久化到MySQL/ES,文件类消息的二进制转存到文件子服务只留file_id
-        //这是"消息不丢"可靠性保证的消费端实现,跟Transmute的publish形成生产-消费对
-        void onMessage(const char *body, size_t sz) {
-            LOG_DEBUG("收到新消息，进行存储处理！");
-            //1. 取出序列化的消息内容，进行反序列化
-            bite_im::MessageInfo message;
-            bool ret = message.ParseFromArray(body, sz);
-            if (ret == false) {
-                LOG_ERROR("对消费到的消息进行反序列化失败！");
-                return;
-            }
-            if (message.client_message_id().empty()) {
-                // 兼容升级前仍在队列中的旧消息。
-                message.set_client_message_id(message.message_id());
-            }
-            if (_mysql_message->existsClientMessage(message.client_message_id())) {
-                LOG_INFO("忽略重复消费的消息：{}", message.client_message_id());
-                return;
-            }
-            //2. 根据不同的消息类型进行不同的处理
-            std::string file_id, file_name, content;
-            int64_t file_size;
-            switch(message.message().message_type()) {
-                //  1. 如果是一个文本类型消息，取元信息存储到ES中
-                case MessageType::STRING:
-                    content = message.message().string_message().content();
-                    ret = _es_message->appendData(
+        //仅在依赖写入完成或记录已存在时允许 MQ ACK；临时失败请求重投。
+        ConsumeResult onMessage(const char *body, size_t sz) {
+            MessagePersistence persistence(
+                [this](const std::string &client_id) {
+                    return _mysql_message->existsClientMessage(client_id);
+                },
+                [this](const MessageInfo &message) {
+                    return _es_message->appendData(
                         message.sender().user_id(),
                         message.message_id(),
                         message.timestamp(),
                         message.chat_session_id(),
-                        content);
-                    if (ret == false) {
-                        LOG_ERROR("文本消息向存储引擎进行存储失败！");
-                        return;
-                    }
-                    break;
-                //  2. 如果是一个图片/语音/文件消息，则取出数据存储到文件子服务中，并获取文件ID
-                case MessageType::IMAGE:
-                    {
-                        const auto &msg = message.message().image_message();
-                        ret = _PutFile("", msg.image_content(), msg.image_content().size(), file_id);
-                        if (ret == false) {
-                            LOG_ERROR("上传图片到文件子服务失败！");
-                            return ;
-                        }
-                    }
-                    break;
-                case MessageType::FILE:
-                    {
-                        const auto &msg = message.message().file_message();
-                        file_name = msg.file_name();
-                        file_size = msg.file_size();
-                        ret = _PutFile(file_name, msg.file_contents(), file_size, file_id);
-                        if (ret == false) {
-                            LOG_ERROR("上传文件到文件子服务失败！");
-                            return ;
-                        }
-                    }
-                    break;
-                case MessageType::SPEECH:
-                    {
-                        const auto &msg = message.message().speech_message();
-                        ret = _PutFile("", msg.file_contents(), msg.file_contents().size(), file_id);
-                        if (ret == false) {
-                            LOG_ERROR("上传语音到文件子服务失败！");
-                            return ;
-                        }
-                    }
-                    break;
-                default:
-                    LOG_ERROR("消息类型错误！");
-                    return;
-            }
-            //3. 提取消息的元信息，存储到mysql数据库中
-            bite_im::Message msg(message.message_id(),
-                message.client_message_id(),
-                message.chat_session_id(),
-                message.sender().user_id(),
-                message.message().message_type(),
-                boost::posix_time::from_time_t(message.timestamp()));
-            msg.content(content);
-            msg.file_id(file_id);
-            msg.file_name(file_name);
-            msg.file_size(file_size);
-            auto insert_result = _mysql_message->insert(msg);
-            if (insert_result == MessageTable::InsertResult::ERROR) {
-                LOG_ERROR("向数据库插入新消息失败！");
-                return;
-            }
+                        message.message().string_message().content());
+                },
+                [this](const std::string &name, const std::string &bytes,
+                       int64_t size, std::string &file_id) {
+                    return _PutFile(name, bytes, size, file_id);
+                },
+                [this](const MessageInfo &message, const MessagePersistence::StoredBody &stored) {
+                    bite_im::Message msg(message.message_id(),
+                        message.client_message_id(),
+                        message.chat_session_id(),
+                        message.sender().user_id(),
+                        message.message().message_type(),
+                        boost::posix_time::from_time_t(message.timestamp()));
+                    msg.content(stored.content);
+                    msg.file_id(stored.file_id);
+                    msg.file_name(stored.file_name);
+                    msg.file_size(stored.file_size);
+                    // DUPLICATE also means the original record is persisted.
+                    return _mysql_message->insert(msg) != MessageTable::InsertResult::ERROR;
+                });
+            return persistence.process(body, sz);
         }
     private:
         //批量获取多个用户的信息(供GetHistoryMsg/GetRecentMsg/MsgSearch组装sender字段用)

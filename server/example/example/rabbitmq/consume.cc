@@ -1,5 +1,5 @@
-#include "../../../code/server/common/rabbitmq.hpp"
-#include "../../../code/server/common/logger.hpp"
+#include "../../../common/rabbitmq.hpp"
+#include "../../../common/logger.hpp"
 #include <gflags/gflags.h>
 
 DEFINE_string(user, "root", "rabbitmq访问用户名");
@@ -11,11 +11,12 @@ DEFINE_bool(run_mode, false, "程序的运行模式，false-调试； true-发�
 DEFINE_string(log_file, "", "发布模式下，用于指定日志的输出文件");
 DEFINE_int32(log_level, 0, "发布模式下，用于指定日志输出等级");
 
-void callback(const char *body, size_t sz)
+bite_im::ConsumeResult callback(const char *body, size_t sz)
 {
     std::string msg;
     msg.assign(body, sz);
     std::cout << msg << std::endl;
+    return bite_im::ConsumeResult::Ack;
 }
 
 int main(int argc, char *argv[])
