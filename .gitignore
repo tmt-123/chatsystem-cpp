@@ -1,0 +1,60 @@
+# Out-of-source CMake and Qt builds (including per-service build directories)
+build/
+build-*/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
+compile_commands.json
+CMakeUserPresets.json
+*.user
+*.user.*
+
+# Compiler and linker output; keep source schemas and generated-code policy explicit
+*.o
+*.obj
+*.a
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.pdb
+*.ilk
+
+# Local editor and OS files; shared editor tasks may still be committed
+.vs/
+.idea/
+.vscode/settings.json
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Private configuration (tracked service configuration is not excluded)
+.env
+.env.*
+!.env.example
+!.env.sample
+*.local.conf
+*.local.yaml
+*.local.yml
+.secrets/
+
+# Runtime volumes and logs
+/server/middle/data/
+*.log
+
+# Local exports and scratch files
+/output/
+/tmp/
+
+# Personal resume artifacts are not part of the IM project
+/resume_assets/
+/resume_*.tex
+/resume_*.pdf
+/resume_*.zip
