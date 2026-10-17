@@ -248,3 +248,5 @@ const QString WEBSOCKET_URL = "ws://127.0.0.1:8001/ws";
 ## 参与开发
 
 欢迎通过 Issue 提交问题或建议，也欢迎提交 Pull Request 完善功能、文档和测试。
+
+分支开发、提交说明、构建验证与 PR 流程见 [贡献指南](CONTRIBUTING.md)。
