@@ -52,7 +52,7 @@ class MessageServiceImpl : public bite_im::MsgStorageService {
             _file_service_name(file_service_name),
             _user_service_name(user_service_name),
             _mm_channels(channel_manager){
-            _es_message->createIndex();
+            if (!_es_message->createIndex()) throw std::runtime_error("message ES index initialization failed");
         }
         ~MessageServiceImpl(){}
         //获取指定会话指定时间范围内的历史消息

@@ -417,6 +417,11 @@ void MainWidget::initSignalSlot()
 void MainWidget::initWebsocket()
 {
     DataCenter* dataCenter = DataCenter::getInstance();
+    messageEditArea->setEnabled(false);
+    connect(dataCenter, &DataCenter::realtimeConnectionChanged, this, [this](bool connected, const QString& reason) {
+        setWindowTitle(connected ? "我的聊天室" : "我的聊天室 · " + reason);
+        messageEditArea->setEnabled(connected);
+    });
     dataCenter->initWebsocket();
 }
 

@@ -6,6 +6,8 @@
 #include <QWebSocket>
 #include <QProtobufSerializer>
 #include <QNetworkReply>
+#include <QTimer>
+#include <QSet>
 
 #include "../model/data.h"
 
@@ -21,9 +23,9 @@ class NetClient : public QObject
 {
     Q_OBJECT
 private:
-    // 定义重要常量. ip 都暂时使用本地的环回 ip. 端口号约定成 8000 和 8001
-    const QString HTTP_URL = "http://127.0.0.1:8000";
-    const QString WEBSOCKET_URL = "ws://127.0.0.1:8001/ws";
+    // Override the local gateway for remote deployments without recompiling.
+    const QString HTTP_URL = qEnvironmentVariable("SOARIM_HTTP_URL", "http://127.0.0.1:9000");
+    const QString WEBSOCKET_URL = qEnvironmentVariable("SOARIM_WEBSOCKET_URL", "ws://127.0.0.1:9001");
 
 public:
     NetClient(model::DataCenter* dataCenter);
@@ -117,6 +119,15 @@ public:
     void speechConvertText(const QString& loginSessionId, const QString& fileId, const QByteArray& content);
 
 private:
+    void scheduleReconnect();
+    void expireLogin();
+    void sendDeliveryAck(const QString& messageId);
+    QSet<QString> pendingDeliveryAcks;
+    bool websocketInitialized = false;
+    bool reconnectEnabled = false;
+    bool authenticated = false;
+    int reconnectDelay = 1000;
+    QTimer reconnectTimer, authenticationTimer;
     model::DataCenter* dataCenter;
 
     // http 客户端

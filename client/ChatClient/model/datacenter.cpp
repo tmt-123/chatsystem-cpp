@@ -212,8 +212,8 @@ void DataCenter::resetFriendList(std::shared_ptr<bite_im::GetFriendListRsp> resp
     }
     friendList->clear();
 
-    QList<bite_im::UserInfo>& friendListPB = resp->friendList();
-    for (auto& f : friendListPB) {
+    const auto& friendListPB = resp->friendList();
+    for (const auto& f : friendListPB) {
         UserInfo userInfo;
         userInfo.load(f);
         friendList->push_back(userInfo);
@@ -288,6 +288,7 @@ void DataCenter::resetRecentMessageList(const QString &chatSessionId, std::share
     // 拿到 chatSessionId 对应的消息列表, 并清空
     // 注意此处务必是引用类型, 才是修改哈希表内部的内容.
     QList<Message>& messageList = (*recentMessages)[chatSessionId];
+    const QList<Message> previous = messageList;
     messageList.clear();
 
     // 遍历响应结果的列表
@@ -295,8 +296,20 @@ void DataCenter::resetRecentMessageList(const QString &chatSessionId, std::share
         Message message;
         message.load(m);
 
+        for (const Message& cached : previous) {
+            if ((!cached.messageId.isEmpty() && cached.messageId == message.messageId)
+                || (!cached.clientMessageId.isEmpty() && cached.clientMessageId == message.clientMessageId
+                    && cached.sender.userId == message.sender.userId)) {
+                message.deliveryStatus = cached.deliveryStatus;
+                message.deliveryError = cached.deliveryError;
+                break;
+            }
+        }
         messageList.push_back(message);
     }
+    // MQ persistence can lag behind the live push. A history response must not
+    // erase a just-received message, a pending send, or its newer delivery state.
+    for (const Message& cached : previous) addMessage(cached);
 }
 
 void DataCenter::sendTextMessageAsync(const QString &chatSessionId, const QString &content)
@@ -691,7 +704,8 @@ bool DataCenter::addMessage(const Message &message)
     for (Message& existing : messageList) {
         const bool sameServerId = !message.messageId.isEmpty() && existing.messageId == message.messageId;
         const bool sameClientId = !message.clientMessageId.isEmpty()
-                && existing.clientMessageId == message.clientMessageId;
+                && existing.clientMessageId == message.clientMessageId
+                && existing.sender.userId == message.sender.userId;
         if (!sameServerId && !sameClientId) {
             continue;
         }
@@ -702,7 +716,7 @@ bool DataCenter::addMessage(const Message &message)
         }
         if (existing.deliveryStatus == DeliveryStatus::PENDING
                 || existing.deliveryStatus == DeliveryStatus::FAILED) {
-            existing.deliveryStatus = DeliveryStatus::DELIVERED;
+            existing.deliveryStatus = DeliveryStatus::SENT;
             existing.deliveryError.clear();
             emit sendMessageStatusChanged(existing.clientMessageId, existing.deliveryStatus, "");
         }
@@ -724,6 +738,7 @@ void DataCenter::updateMessageStatus(const QString &clientMessageId, const QStri
             if (message.clientMessageId != clientMessageId) {
                 continue;
             }
+            if (myself && message.sender.userId != myself->userId) continue;
             if (!serverMessageId.isEmpty()) {
                 message.messageId = serverMessageId;
             }

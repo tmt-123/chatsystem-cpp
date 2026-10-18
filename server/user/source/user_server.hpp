@@ -40,12 +40,11 @@ class UserServiceImpl : public bite_im::UserService {
             _es_user(std::make_shared<ESUser>(es_client)),
             _mysql_user(std::make_shared<UserTable>(mysql_client)),
             _redis_session(std::make_shared<Session>(redis_client)),
-            _redis_status(std::make_shared<Status>(redis_client)),
             _redis_codes(std::make_shared<Codes>(redis_client)),
             _file_service_name(file_service_name),
             _mm_channels(channel_manager),
             _dms_client(dms_client){
-            _es_user->createIndex();   //启动时确保ES用户索引已创建
+            if (!_es_user->createIndex()) throw std::runtime_error("user ES index initialization failed");
         }
         ~UserServiceImpl(){}
         //校验昵称格式：长度需小于22个字符
@@ -172,17 +171,18 @@ class UserServiceImpl : public bite_im::UserService {
                 LOG_ERROR("{} - 用户名或密码错误，用户={}！", request->request_id(), nickname);
                 return err_response(request->request_id(), "用户名或密码错误!");
             }
-            //3. 根据 redis 中的登录标记信息是否存在判断用户是否已经登录。
-            bool ret = _redis_status->exists(user->user_id());
-            if (ret == true) {
+            // Atomically acquire an expiring login lease (no check/set race).
+            std::string ssid = uuid();
+            bool created = false;
+            try { created = _redis_session->create(ssid, user->user_id()); }
+            catch (const std::exception &e) {
+                LOG_ERROR("{} - 登录会话创建失败: {}", request->request_id(), e.what());
+                return err_response(request->request_id(), "登录服务暂时不可用，请稍后重试");
+            }
+            if (!created) {
                 LOG_ERROR("{} - 用户已在其他地方登录 - {}！", request->request_id(), nickname);
                 return err_response(request->request_id(), "用户已在其他地方登录!");
             }
-            //4. 构造会话 ID，生成会话键值对，向 redis 中添加会话信息以及登录标记信息
-            std::string ssid = uuid();
-            _redis_session->append(ssid, user->user_id());
-            //5. 添加用户登录信息
-            _redis_status->append(user->user_id());
             //6. 组织响应，返回生成的会话 ID
             response->set_request_id(request->request_id());
             response->set_login_session_id(ssid);
@@ -328,17 +328,17 @@ class UserServiceImpl : public bite_im::UserService {
                 return err_response(request->request_id(), "验证码错误!");
             }
             _redis_codes->remove(code_id);
-            // 5. 根据 redis 中的登录标记信息是否存在判断用户是否已经登录。
-            ret = _redis_status->exists(user->user_id());
-            if (ret == true) {
+            std::string ssid = uuid();
+            bool created = false;
+            try { created = _redis_session->create(ssid, user->user_id()); }
+            catch (const std::exception &e) {
+                LOG_ERROR("{} - 登录会话创建失败: {}", request->request_id(), e.what());
+                return err_response(request->request_id(), "登录服务暂时不可用，请稍后重试");
+            }
+            if (!created) {
                 LOG_ERROR("{} - 用户已在其他地方登录！", request->request_id());
                 return err_response(request->request_id(), "用户已在其他地方登录!");
             }
-            //6. 构造会话 ID，生成会话键值对，向 redis 中添加会话信息以及登录标记信息
-            std::string ssid = uuid();
-            _redis_session->append(ssid, user->user_id());
-            //7. 添加用户登录信息
-            _redis_status->append(user->user_id());
             // 8. 组织响应，返回生成的会话 ID
             response->set_request_id(request->request_id());
             response->set_login_session_id(ssid);
@@ -665,7 +665,6 @@ class UserServiceImpl : public bite_im::UserService {
         ESUser::ptr _es_user;          //ES用户数据管理
         UserTable::ptr _mysql_user;     //MySQL用户数据管理
         Session::ptr _redis_session;    //Redis会话管理(会话ID->用户ID)
-        Status::ptr _redis_status;      //Redis登录状态管理(用户ID->登录标记)
         Codes::ptr _redis_codes;        //Redis验证码管理(验证码ID->验证码)
         //这边是rpc调用客户端相关对象
         std::string _file_service_name;  //依赖的文件子服务名称

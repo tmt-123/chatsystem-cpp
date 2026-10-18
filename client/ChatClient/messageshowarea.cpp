@@ -402,9 +402,9 @@ void MessageContentLabel::mousePressEvent(QMouseEvent *event)
                 return;
             }
             SoundRecorder* soundRecorder = SoundRecorder::getInstance();
-            this->label->setText("播放中...");
             connect(soundRecorder, &SoundRecorder::soundPlayDone, this, &MessageContentLabel::playDone, Qt::UniqueConnection);
-            soundRecorder->startPlay(this->content);
+            if (soundRecorder->startPlay(this->content)) this->label->setText("播放中...");
+            else playDone();
         } else {
             // 其他消息, 比如普通的文本消息
             // 啥都不做

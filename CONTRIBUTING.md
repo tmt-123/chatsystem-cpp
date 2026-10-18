@@ -13,7 +13,7 @@
 ```bash
 git switch main
 git pull --ff-only origin main
-git switch -c codex/fix-mq-consumer-ack
+git switch -c fix/mq-consumer-ack
 ```
 
 切换前先检查 `git status`，保留已有本地改动。如果无法快进同步，先查明分歧，不要用强制覆盖代替处理。

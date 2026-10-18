@@ -13,6 +13,7 @@
 #include "channel.hpp"  // 信道管理模块封装
 
 #include "connection.hpp"
+#include "delivery_receipts.hpp"
 
 #include "user.pb.h"  // protobuf框架代码
 #include "base.pb.h"  // protobuf框架代码
@@ -89,7 +90,6 @@ namespace bite_im{
                 const std::string transmite_service_name,
                 const std::string friend_service_name)
                 :_redis_session(std::make_shared<Session>(redis_client)),
-                _redis_status(std::make_shared<Status>(redis_client)),
                 _mm_channels(channels),
                 _service_discoverer(service_discoverer),
                 _user_service_name(user_service_name),
@@ -108,6 +108,22 @@ namespace bite_im{
                 auto wscb = std::bind(&GatewayServer::onMessage, this, 
                     std::placeholders::_1, std::placeholders::_2);
                 _ws_server.set_message_handler(wscb);                              // 收到消息回调(第一条消息做身份绑定)
+                _ws_server.set_pong_timeout(10000);
+                _ws_server.set_pong_handler([this](websocketpp::connection_hdl hdl, std::string) {
+                    auto conn = _ws_server.get_con_from_hdl(hdl);
+                    std::string uid, ssid;
+                    try {
+                        if (_connections->client(conn, uid, ssid) && _connections->isCurrent(conn)
+                            && _redis_session->renew(ssid, uid)) return true;
+                    } catch (const std::exception &e) { LOG_WARN("心跳续租失败: {}", e.what()); }
+                    websocketpp::lib::error_code ec;
+                    conn->close(websocketpp::close::status::policy_violation, "session expired", ec);
+                    return false;
+                });
+                _ws_server.set_pong_timeout_handler([this](websocketpp::connection_hdl hdl, std::string) {
+                    websocketpp::lib::error_code ec;
+                    _ws_server.close(hdl, websocketpp::close::status::going_away, "heartbeat timeout", ec);
+                });
                 _ws_server.set_reuse_addr(true);                                    // 端口复用,避免 TIME_WAIT 卡住重启
                 _ws_server.listen(websocket_port);                                  // TCP 监听 9001
                 _ws_server.start_accept();                                         // 开始接受握手
@@ -157,6 +173,16 @@ namespace bite_im{
             //(真正身份识别在 onMessage 收到第一条 ClientAuthenticationReq 时完成)
             void onOpen(websocketpp::connection_hdl hdl) {
                 LOG_DEBUG("websocket长连接建立成功 {}", (size_t)_ws_server.get_con_from_hdl(hdl).get());
+                _ws_server.set_timer(15000, [this, hdl](const websocketpp::lib::error_code &ec) {
+                    if (ec) return;
+                    websocketpp::lib::error_code lookup_ec;
+                    auto conn = _ws_server.get_con_from_hdl(hdl, lookup_ec);
+                    if (lookup_ec) return;
+                    if (conn->get_state() == websocketpp::session::state::open && !_connections->isCurrent(conn)) {
+                        websocketpp::lib::error_code close_ec;
+                        conn->close(websocketpp::close::status::policy_violation, "authentication timeout", close_ec);
+                    }
+                });
             }
             void onClose(websocketpp::connection_hdl hdl) {
                 //长连接断开时做的清理工作
@@ -168,28 +194,30 @@ namespace bite_im{
                     LOG_WARN("长连接断开，未找到长连接对应的客户端信息！");
                     return ;
                 }
-                //1. 移除登录会话信息
-                _redis_session->remove(ssid);
-                //2. 移除登录状态信息
-                _redis_status->remove(uid);
-                //3. 移除长连接管理数据
-                _connections->remove(conn);
+                // A superseded socket must not clear the new socket's lease.
+                if (_connections->remove(conn)) {
+                    try { _redis_session->release(ssid, uid); }
+                    catch (const std::exception &e) { LOG_WARN("释放登录租约失败，将等待自动过期: {}", e.what()); }
+                }
                 LOG_DEBUG("用户 {} 长连接断开，清理缓存数据，connection={}", uid, (size_t)conn.get());
             }
-            //心跳保活:每 60 秒发一个 WebSocket ping 帧,防止中间路由回收空闲连接
+            //每 30 秒 ping，收到 pong 才续租；超时连接由 pong_timeout_handler 关闭。
             //连接已关闭则停止递归(递归靠 set_timer 自驱动,非独立定时器线程)
             void keepAlive(server_t::connection_ptr conn) {
                 if (!conn || conn->get_state() != websocketpp::session::state::value::open) {
                     LOG_DEBUG("非正常连接状态，结束连接保活");
                     return;
                 }
-                conn->ping("");
-                _ws_server.set_timer(60000, std::bind(&GatewayServer::keepAlive, this, conn));
+                if (!_connections->isCurrent(conn)) return;
+                websocketpp::lib::error_code ec;
+                conn->ping("", ec);
+                if (!ec) _ws_server.set_timer(30000, std::bind(&GatewayServer::keepAlive, this, conn));
             }
-            //WebSocket 收消息回调:专门处理第一条消息做身份绑定
+            //WebSocket 首帧绑定身份；后续帧只接受已绑定身份的送达 ACK。
             //协议规定:客户端握手成功后,第一条消息必须发 ClientAuthenticationReq(含 session_id)
             //鉴权通过后将 (conn ↔ uid,ssid) 双向映射塞入 _connections,此后该连接可收推送
             void onMessage(websocketpp::connection_hdl hdl, server_t::message_ptr msg) {
+                try {
                 //收到第一条消息后，根据消息中的会话ID进行身份识别，将客户端长连接添加管理
                 //1. 取出长连接对应的连接对象
                 auto conn = _ws_server.get_con_from_hdl(hdl);
@@ -201,19 +229,59 @@ namespace bite_im{
                     _ws_server.close(hdl, websocketpp::close::status::unsupported_data, "正文反序列化失败!");
                     return;
                 }
+                std::string bound_uid, bound_ssid;
+                if (_connections->client(conn, bound_uid, bound_ssid)) {
+                    if (!_connections->isCurrent(conn) || !_redis_session->uid(bound_ssid)) {
+                        _ws_server.close(hdl, websocketpp::close::status::policy_violation, "session expired");
+                        return;
+                    }
+                    // No user id or token supplied by the ACK can change identity.
+                    if (!request.has_delivery_ack() || !request.session_id().empty()) return;
+                    auto receipt = _receipts.acknowledge(request.delivery_ack().message_id(), bound_uid);
+                    if (!receipt) return;
+                    auto sender = _connections->connection(receipt->sender);
+                    if (!sender) return;
+                    NotifyMessage notify;
+                    notify.set_notify_type(NotifyType::MESSAGE_DELIVERY_NOTIFY);
+                    auto ack = notify.mutable_delivery_receipt();
+                    ack->set_message_id(receipt->message_id);
+                    ack->set_client_message_id(receipt->client_id);
+                    ack->set_chat_session_id(receipt->chat_id);
+                    ack->set_delivered_target_count(receipt->delivered);
+                    sender->send(notify.SerializeAsString(), websocketpp::frame::opcode::binary);
+                    return;
+                }
                 //3. 在会话信息缓存中，查找会话信息 
                 std::string ssid = request.session_id();
                 auto uid = _redis_session->uid(ssid);
                 //4. 会话信息不存在则关闭连接
-                if (!uid) {
+                if (!uid || request.has_delivery_ack() || !_redis_session->renew(ssid, *uid)) {
+                    NotifyMessage notify;
+                    notify.set_notify_type(NotifyType::AUTHENTICATION_NOTIFY);
+                    notify.mutable_authentication()->set_success(false);
+                    notify.mutable_authentication()->set_errmsg("登录已过期，请重新登录");
+                    conn->send(notify.SerializeAsString(), websocketpp::frame::opcode::binary);
                     LOG_ERROR("长连接身份识别失败：未找到会话信息！");
                     _ws_server.close(hdl, websocketpp::close::status::unsupported_data, "未找到会话信息!");
                     return;
                 }
                 //5. 会话信息存在，则添加长连接管理
-                _connections->insert(conn, *uid, ssid);
+                auto old = _connections->insert(conn, *uid, ssid);
+                if (old && old != conn) {
+                    websocketpp::lib::error_code ec;
+                    old->close(websocketpp::close::status::policy_violation, "connection replaced", ec);
+                }
+                NotifyMessage notify;
+                notify.set_notify_type(NotifyType::AUTHENTICATION_NOTIFY);
+                notify.mutable_authentication()->set_success(true);
+                conn->send(notify.SerializeAsString(), websocketpp::frame::opcode::binary);
                 LOG_DEBUG("新增长连接管理：用户={}，connection={}", *uid, (size_t)conn.get());
                 keepAlive(conn);
+                } catch (const std::exception &e) {
+                    LOG_WARN("WebSocket 请求处理失败: {}", e.what());
+                    websocketpp::lib::error_code ec;
+                    _ws_server.close(hdl, websocketpp::close::status::internal_endpoint_error, "service unavailable", ec);
+                }
             }
             //--- 用户管理类 handler(均转发至 UserService) ---
             //获取短信验证码:[无鉴权]透传至 UserService.GetPhoneVerifyCode
@@ -1388,20 +1456,29 @@ namespace bite_im{
                     return err_response("消息转发子服务调用失败！");
                 }
                 // 4. 若业务处理成功 --- 且获取被申请方长连接成功，则向被申请放进行好友申请事件通知
-                uint32_t delivered_target_count = 0;
                 if (target_rsp.success()){
+                    std::vector<std::pair<std::string, server_t::connection_ptr>> deliveries;
                     for (int i = 0; i < target_rsp.target_id_list_size(); i++) {
                         std::string notify_uid = target_rsp.target_id_list(i);
                         if (notify_uid == *uid) continue; //不通知自己
                         auto conn = _connections->connection(notify_uid);
                         if (!conn) { continue;}
+                        deliveries.emplace_back(notify_uid, conn);
+                    }
+                    std::vector<std::string> targets;
+                    for (const auto &delivery : deliveries) targets.push_back(delivery.first);
+                    // Register before sending: a fast client may ACK before HTTP returns.
+                    _receipts.track(*uid, req.client_message_id(), target_rsp.message().message_id(),
+                                    target_rsp.message().chat_session_id(), targets);
+                    for (const auto &delivery : deliveries) {
+                        const auto &notify_uid = delivery.first;
+                        const auto &conn = delivery.second;
                         NotifyMessage notify;
                         notify.set_notify_type(NotifyType::CHAT_MESSAGE_NOTIFY);
                         auto msg_info = notify.mutable_new_message_info();
                         msg_info->mutable_message_info()->CopyFrom(target_rsp.message());
                         try {
                             conn->send(notify.SerializeAsString(), websocketpp::frame::opcode::value::binary);
-                            ++delivered_target_count;
                         } catch (const std::exception &e) {
                             LOG_WARN("{} 消息实时推送失败，目标用户={}：{}", req.request_id(), notify_uid, e.what());
                         }
@@ -1413,16 +1490,16 @@ namespace bite_im{
                 rsp.set_errmsg(target_rsp.errmsg());
                 rsp.set_client_message_id(req.client_message_id());
                 rsp.set_message_id(target_rsp.message().message_id());
-                rsp.set_delivered_target_count(delivered_target_count);
+                rsp.set_delivered_target_count(0); // Only a recipient ACK establishes delivery.
                 rsp.set_delivery_status(target_rsp.success()
-                    ? (delivered_target_count > 0 ? DeliveryStatus::DELIVERED : DeliveryStatus::SENT)
+                    ? DeliveryStatus::SENT
                     : DeliveryStatus::FAILED);
                 response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
             }
         private:
             //--- Redis 状态层(鉴权/在线判断的核心) ---
             Session::ptr _redis_session;    // ssid → uid 映射(登录会话表)
-            Status::ptr _redis_status;       // uid → 在线标记表
+            DeliveryReceipts _receipts;
 
             //--- 下游子服务名(从 etcd 配置加载,choose() 按此查 ServiceChannel) ---
             std::string _user_service_name;
