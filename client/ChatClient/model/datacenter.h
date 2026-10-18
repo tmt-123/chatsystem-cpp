@@ -4,7 +4,7 @@
 #include <QWidget>
 #include "data.h"
 
-#include "../network/netclient.h"
+#include "../network/NetClient.h"
 
 namespace model {
 
@@ -214,6 +214,7 @@ public:
                              DeliveryStatus status, const QString& reason = "");
 
 signals:
+    void realtimeConnectionChanged(bool connected, const QString& reason);
     // 自定义信号
     void getMyselfDone();
     void getFriendListDone();

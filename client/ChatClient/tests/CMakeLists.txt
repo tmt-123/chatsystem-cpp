@@ -1,0 +1,18 @@
+cmake_minimum_required(VERSION 3.21)
+project(client_reliability_tests LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_AUTOMOC ON)
+find_package(Qt6 REQUIRED COMPONENTS Core Test Multimedia Widgets Network WebSockets Protobuf)
+enable_testing()
+qt_add_executable(soundrecorder_test soundrecorder_test.cpp ../soundrecorder.cpp ../soundrecorder.h)
+target_link_libraries(soundrecorder_test PRIVATE Qt6::Core Qt6::Test Qt6::Multimedia)
+add_test(NAME soundrecorder COMMAND soundrecorder_test)
+
+qt_add_executable(message_state_test message_state_test.cpp ../model/datacenter.cpp
+                  ../model/datacenter.h ../network/NetClient.cpp ../network/NetClient.h)
+file(GLOB PROTOS ../proto/*.proto)
+qt_add_protobuf(message_state_test PROTO_FILES ${PROTOS})
+target_include_directories(message_state_test PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+target_link_libraries(message_state_test PRIVATE Qt6::Test Qt6::Widgets Qt6::Network Qt6::WebSockets Qt6::Protobuf)
+add_test(NAME message_state COMMAND message_state_test)
+set_tests_properties(message_state PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

@@ -216,14 +216,46 @@ cmake -S client/ChatClient -B client/ChatClient/build
 cmake --build client/ChatClient/build --config Release
 ```
 
-客户端连接地址定义在 `client/ChatClient/network/NetClient.h`：
+客户端默认连接 `http://127.0.0.1:9000` 和 `ws://127.0.0.1:9001`，与 Compose 暴露端口一致。
+远程部署时在启动前设置环境变量，无需修改源码或重新编译。例如 PowerShell：
 
-```cpp
-const QString HTTP_URL = "http://127.0.0.1:8000";
-const QString WEBSOCKET_URL = "ws://127.0.0.1:8001/ws";
+```powershell
+$env:SOARIM_HTTP_URL = "http://<gateway-host>:9000"
+$env:SOARIM_WEBSOCKET_URL = "ws://<gateway-host>:9001"
+.\ChatClient.exe
 ```
 
-当前 Docker Compose 暴露的 Gateway 端口为 `9000/9001`，启动客户端前需要将两处地址修改为实际网关地址和端口，或同步调整 Gateway 配置。
+默认直连网关；确需使用系统代理时设置 `SOARIM_USE_SYSTEM_PROXY=1`。
+连接中断时按 1–30 秒退避重连，收到网关认证成功后才启用消息编辑区；会话失效时清理本地令牌并提示重新登录。
+
+## 运行可靠性与升级说明
+
+### 音频设备
+
+语音使用 16 kHz、单声道、Int16 PCM。录制和播放设备独立初始化；无设备、格式不支持、文件不可写或音频启动失败时提示错误，不发送空录音，也不访问未初始化的设备对象。未做采样率转换，不支持该格式的设备需要更换或配置后重试。
+
+### 登录会话
+
+Redis 原子创建登录会话与租约：未建立长连接的登录占用 30 秒，在线租约 90 秒，会话令牌 24 小时；收到 WebSocket pong 后续租，每 30 秒 ping，10 秒无 pong 则关闭连接。断线释放当前连接所属的租约，未过期令牌可重连；再次密码登录会使旧令牌失效。旧连接关闭不能删除新连接的状态。
+
+首次升级需同时更新 UserService 和 Gateway，旧版本无归属记录的令牌需要重新登录。历史空值登录标记由下一次成功登录替换为有过期时间的租约，不执行批量清库。
+
+### Elasticsearch 索引
+
+启动时使用 `PUT /<index>` 创建真正的 mapping，不再写入 `default_index_id` 文档；初始化失败会阻止 UserService/MessageService 启动。`keyword`/`long` 不设置 analyzer，非检索字段使用 `index: false`。
+
+- 默认文本分词器为 ES 内置 `standard`，无需 IK 插件；如需 IK，在所有 ES 节点安装匹配版本的插件后，为 UserService、MessageService 设置 `SOARIM_ES_TEXT_ANALYZER=ik_max_word`。这不是自动插件安装或索引迁移。
+- 已存在的兼容 mapping 直接复用；旧动态 `text + keyword` 字段通过 `.keyword` 子字段查询，不覆盖已有索引。
+- mapping 不兼容时先备份，再创建新 mapping、执行 `_reindex`、校验文档数和搜索结果；通过 `SOARIM_ES_USER_INDEX` / `SOARIM_ES_MESSAGE_INDEX` 指定新索引后协调停写切换。迁移时排除历史 `default_index_id` 伪文档。保留旧索引用于回退，不直接删除线上数据。
+- `standard` 与 IK 的中文分词行为不同；只有配置并验证 IK 后才能声称使用 IK 中文分词。
+
+### 消息送达语义
+
+HTTP `NewMessageRsp` 成功仅返回 `SENT`、`delivered_target_count=0`，不表示已落库或接收端已确认。接收端将实时消息放入本地缓存后，发送 `ClientAuthenticationReq.delivery_ack`；Gateway 根据已认证连接的用户身份及本次在线投递目标校验 ACK，再通过 `MESSAGE_DELIVERY_NOTIFY` 通知发送者，客户端更新为 `DELIVERED`。历史拉取、发送方自己的推送及 socket 写入不视为送达；重复推送仍 ACK，但不重复显示或增加未读数。
+
+群聊计数为唯一已确认接收者数，至少一位确认即显示“已送达”，不代表全员已读。回执窗口为当前 Gateway 内存中最多 10,000 条、保留 10 分钟；超时、重启、发送方离线造成的回执丢失不会补发，不提供跨网关路由或持久化送达保证。网关与 Qt 客户端需配套升级，旧客户端不发送 ACK 时保持 `SENT`。迟到的 HTTP 回调及历史拉取不会回退已确认的状态。
+
+回归测试命令与范围见 [运行可靠性测试](server/tests/RUNTIME_TESTS.md)。
 
 ## 接口定义
 

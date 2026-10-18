@@ -9,6 +9,11 @@ option cc_generic_services = true;
 message ClientAuthenticationReq {
     string request_id = 1;
     string session_id = 2;
+    ClientDeliveryAck delivery_ack = 3; // Only accepted after authentication.
+}
+
+message ClientDeliveryAck {
+    string message_id = 1;
 }
 message ClientAuthenticationRsp {
     string request_id = 1;

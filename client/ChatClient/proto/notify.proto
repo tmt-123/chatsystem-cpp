@@ -10,6 +10,8 @@ enum NotifyType {
     CHAT_SESSION_CREATE_NOTIFY = 2;
     CHAT_MESSAGE_NOTIFY = 3;
     FRIEND_REMOVE_NOTIFY = 4;
+    MESSAGE_DELIVERY_NOTIFY = 5;
+    AUTHENTICATION_NOTIFY = 6;
 }
 
 message NotifyFriendAddApply {
@@ -34,10 +36,24 @@ message NotifyMessage {
     optional string notify_event_id = 1;//通知事件操作id（有则填无则忽略）
     NotifyType notify_type = 2;//通知事件类型
     oneof notify_remarks {      //事件备注信息
+        MessageDeliveryReceipt delivery_receipt = 8;
+        NotifyAuthentication authentication = 9;
         NotifyFriendAddApply friend_add_apply = 3;
         NotifyFriendAddProcess friend_process_result = 4;
         NotifyFriendRemove friend_remove = 7;
         NotifyNewChatSession new_chat_session_info = 5;//会话信息
         NotifyNewMessage new_message_info = 6;//消息信息
     }
+}
+
+message MessageDeliveryReceipt {
+    string message_id = 1;
+    string client_message_id = 2;
+    string chat_session_id = 3;
+    uint32 delivered_target_count = 4;
+}
+
+message NotifyAuthentication {
+    bool success = 1;
+    string errmsg = 2;
 }

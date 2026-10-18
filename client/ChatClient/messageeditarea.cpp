@@ -125,6 +125,14 @@ void MessageEditArea::initSignalSlot()
     connect(sendSpeechBtn, &QPushButton::released, this, &MessageEditArea::soundRecordReleased);
     SoundRecorder* soundRecorder = SoundRecorder::getInstance();
     connect(soundRecorder, &SoundRecorder::soundRecordDone, this, &MessageEditArea::sendSpeech);
+    connect(soundRecorder, &SoundRecorder::audioError, this, [](const QString& error) {
+        Toast::showMessage(error);
+    });
+    connect(soundRecorder, &SoundRecorder::recordingStopped, this, [this]() {
+        sendSpeechBtn->setIcon(QIcon(":/resource/image/sound.png"));
+        tipLabel->hide();
+        textEdit->show();
+    });
 }
 
 void MessageEditArea::sendTextMessage()
@@ -259,7 +267,10 @@ void MessageEditArea::soundRecordPressed()
 
     // 开始录音
     SoundRecorder* soundRecorder = SoundRecorder::getInstance();
-    soundRecorder->startRecord();
+    if (!soundRecorder->startRecord()) {
+        sendSpeechBtn->setIcon(QIcon(":/resource/image/sound.png"));
+        return;
+    }
 
     tipLabel->show();
     textEdit->hide();

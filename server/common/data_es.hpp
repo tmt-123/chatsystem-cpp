@@ -13,9 +13,10 @@ namespace bite_im {
         public:
             using ptr = std::shared_ptr<ESUser>;
             ESUser(const std::shared_ptr<elasticlient::Client> &client):
-                _es_client(client){}
+                _index_name(ESIndex::environment("SOARIM_ES_USER_INDEX", "user")), _es_client(client){}
             bool createIndex() {
-                bool ret = ESIndex(_es_client, "user")
+                ESIndex index(_es_client, _index_name);
+                bool ret = index
                     .append("user_id", "keyword", "standard", true)
                     .append("nickname")
                     .append("phone", "keyword", "standard", true)
@@ -27,6 +28,8 @@ namespace bite_im {
                     return false;
                 }
                 LOG_INFO("用户信息索引创建成功!");
+                _uid_field = index.exactField("user_id");
+                _phone_field = index.exactField("phone");
                 return true;
             }
             bool appendData(const std::string &uid,
@@ -34,7 +37,7 @@ namespace bite_im {
                 const std::string &nickname,
                 const std::string &description,
                 const std::string &avatar_id) {
-                bool ret = ESInsert(_es_client, "user")
+                bool ret = ESInsert(_es_client, _index_name)
                     .append("user_id", uid)
                     .append("nickname", nickname)
                     .append("phone", phone)
@@ -50,11 +53,11 @@ namespace bite_im {
             }
             std::vector<User> search(const std::string &key, const std::vector<std::string> &uid_list) {
                 std::vector<User> res;
-                Json::Value json_user = ESSearch(_es_client, "user")
-                    .append_should_match("phone.keyword", key)
-                    .append_should_match("user_id.keyword", key)
+                Json::Value json_user = ESSearch(_es_client, _index_name)
+                    .append_should_match(_phone_field, key)
+                    .append_should_match(_uid_field, key)
                     .append_should_match("nickname", key)
-                    .append_must_not_terms("user_id.keyword", uid_list)
+                    .append_must_not_terms(_uid_field, uid_list)
                     .search();
                 if (json_user.isArray() == false) {
                     LOG_ERROR("用户搜索结果为空，或者结果不是数组类型");
@@ -79,6 +82,7 @@ namespace bite_im {
             // const std::string _phone_key = "user_id";
             // const std::string _name_key = "user_id";
             // const std::string _avatar_key = "user_id";
+            std::string _index_name, _uid_field = "user_id", _phone_field = "phone";
             std::shared_ptr<elasticlient::Client> _es_client;
     };
 
@@ -86,9 +90,10 @@ namespace bite_im {
         public:
             using ptr = std::shared_ptr<ESMessage>;
             ESMessage(const std::shared_ptr<elasticlient::Client> &es_client):
-                _es_client(es_client){}
+                _index_name(ESIndex::environment("SOARIM_ES_MESSAGE_INDEX", "message")), _es_client(es_client){}
             bool createIndex() {
-                bool ret = ESIndex(_es_client, "message")
+                ESIndex index(_es_client, _index_name);
+                bool ret = index
                     .append("user_id", "keyword", "standard", false)
                     .append("message_id", "keyword", "standard", false)
                     .append("create_time", "long", "standard", false)
@@ -100,6 +105,7 @@ namespace bite_im {
                     return false;
                 }
                 LOG_INFO("消息信息索引创建成功!");
+                _session_field = index.exactField("chat_session_id");
                 return true;
             }
             bool appendData(const std::string &user_id,
@@ -107,7 +113,7 @@ namespace bite_im {
                 const long create_time,
                 const std::string &chat_session_id,
                 const std::string &content) {
-                bool ret = ESInsert(_es_client, "message")
+                bool ret = ESInsert(_es_client, _index_name)
                     .append("message_id", message_id)
                     .append("create_time", create_time)
                     .append("user_id", user_id)
@@ -122,7 +128,7 @@ namespace bite_im {
                 return true;
             }
             bool remove(const std::string &mid) {
-                bool ret = ESRemove(_es_client, "message").remove(mid);
+                bool ret = ESRemove(_es_client, _index_name).remove(mid);
                 if (ret == false) {
                     LOG_ERROR("消息数据删除失败!");
                     return false;
@@ -132,8 +138,8 @@ namespace bite_im {
             }
             std::vector<bite_im::Message> search(const std::string &key, const std::string &ssid) {
                 std::vector<bite_im::Message> res;
-                Json::Value json_user = ESSearch(_es_client, "message")
-                    .append_must_term("chat_session_id.keyword", ssid)
+                Json::Value json_user = ESSearch(_es_client, _index_name)
+                    .append_must_term(_session_field, ssid)
                     .append_must_match("content", key)
                     .search();
                 if (json_user.isArray() == false) {
@@ -156,6 +162,7 @@ namespace bite_im {
                 return res;
             }
         private:
+            std::string _index_name, _session_field = "chat_session_id";
             std::shared_ptr<elasticlient::Client> _es_client;
     };
 }

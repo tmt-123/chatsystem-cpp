@@ -4,7 +4,12 @@ option cc_generic_services = true;
 
 message ClientAuthenticationReq {
     string request_id = 1;
-    string session_id = 2; // 用于向服务器表明当前长连接客户端的身份
+    string session_id = 2; // First frame only; subsequent identity comes from the connection.
+    ClientDeliveryAck delivery_ack = 3; // Only accepted after authentication.
+}
+
+message ClientDeliveryAck {
+    string message_id = 1;
 }
 
 //在客户端与网关服务器的通信中，使用HTTP协议进行通信

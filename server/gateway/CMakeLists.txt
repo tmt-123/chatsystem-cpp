@@ -52,5 +52,24 @@ include_directories(${CMAKE_CURRENT_BINARY_DIR})
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../common)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../third/include)
 
+option(GATEWAY_RUNTIME_TESTS "Build the isolated HTTP/WebSocket regression fixture" OFF)
+if(GATEWAY_RUNTIME_TESTS)
+    add_executable(gateway_runtime_fixture ../tests/gateway_runtime_fixture.cc ${proto_srcs})
+    get_target_property(gateway_libraries ${target} LINK_LIBRARIES)
+    target_link_libraries(gateway_runtime_fixture PRIVATE ${gateway_libraries})
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    add_custom_target(gateway_test_proto ALL
+        COMMAND protoc --proto_path=${proto_path} --python_out=${CMAKE_CURRENT_BINARY_DIR}
+            --experimental_allow_proto3_optional ${proto_path}/base.proto ${proto_path}/gateway.proto
+            ${proto_path}/notify.proto ${proto_path}/transmite.proto
+        VERBATIM)
+    add_dependencies(gateway_runtime_fixture gateway_test_proto)
+    enable_testing()
+    add_test(NAME gateway_receipts COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/../tests/test_gateway_receipts.py
+        --fixture $<TARGET_FILE:gateway_runtime_fixture> --proto-dir ${CMAKE_CURRENT_BINARY_DIR})
+    set_tests_properties(gateway_receipts PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE)
+endif()
+
 #8. 设置安装路径
 INSTALL(TARGETS ${target} RUNTIME DESTINATION bin)

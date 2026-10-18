@@ -22,33 +22,39 @@ public:
     /// 录制语音语音
     /////////////////////////////////////////////////
     // 开始录制
-    void startRecord();
+    bool startRecord();
     // 停止录制
     void stopRecord();
+
+    SoundRecorder(const QAudioDevice& input, const QAudioDevice& output,
+                  const QString& directory, QObject* parent = nullptr);
 
 private:
     static SoundRecorder* instance;
     explicit SoundRecorder(QObject *parent = nullptr);
 
     QFile soundFile;
-    QAudioSource* audioSource;
+    QAudioSource* audioSource = nullptr;
+    bool recording = false;
+    bool playing = false;
+    bool storageReady = false;
 
     /////////////////////////////////////////////////
     /// 播放语音
     /////////////////////////////////////////////////
 public:
     // 开始播放
-    void startPlay(const QByteArray& content);
+    bool startPlay(const QByteArray& content);
     // 停止播放
     void stopPlay();
 
 private:
-    QAudioSink *audioSink;
-    QMediaDevices *outputDevices;
-    QAudioDevice outputDevice;
+    QAudioSink *audioSink = nullptr;
     QFile inputFile;
 
 signals:
+    void audioError(const QString& message);
+    void recordingStopped();
     // 录制完毕后发送这个信号
     void soundRecordDone(const QString& path);
     // 播放完毕发送这个信号

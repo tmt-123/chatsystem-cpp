@@ -1,7 +1,9 @@
-#include "netclient.h"
+#include "NetClient.h"
 
 #include <QNetworkReply>
+#include <QNetworkProxy>
 #include <QUuid>
+#include <algorithm>
 
 #include "../model/data.h"
 #include "../model/datacenter.h"
@@ -14,6 +16,12 @@ namespace network {
 NetClient::NetClient(model::DataCenter *dataCenter)
     : dataCenter(dataCenter)
 {
+    // 内网联调默认直连，避免系统代理类型使 WebSocket 握手失败。
+    // 如需代理，可在启动前设置 SOARIM_USE_SYSTEM_PROXY=1。
+    if (qEnvironmentVariableIntValue("SOARIM_USE_SYSTEM_PROXY") == 0) {
+        httpClient.setProxy(QNetworkProxy(QNetworkProxy::NoProxy));
+        websocketClient.setProxy(QNetworkProxy(QNetworkProxy::NoProxy));
+    }
     // 不应该在这个环节, 初始化 websocket, 放到 MainWidget 初始化的时候
     // initWebsocket();
 }
@@ -45,19 +53,50 @@ void NetClient::ping()
 
 void NetClient::initWebsocket()
 {
+    reconnectEnabled = true;
+    if (websocketInitialized) {
+        if (websocketClient.state() == QAbstractSocket::UnconnectedState) websocketClient.open(WEBSOCKET_URL);
+        return;
+    }
+    websocketInitialized = true;
+    reconnectTimer.setSingleShot(true);
+    authenticationTimer.setSingleShot(true);
+    authenticationTimer.setInterval(10000);
+    connect(&reconnectTimer, &QTimer::timeout, this, [this]() {
+        if (!reconnectEnabled) return;
+        if (websocketClient.state() == QAbstractSocket::UnconnectedState)
+            websocketClient.open(WEBSOCKET_URL);
+        else if (!authenticated) scheduleReconnect();
+    });
+    connect(&authenticationTimer, &QTimer::timeout, this, [this]() {
+        if (!authenticated) {
+            websocketClient.abort();
+            scheduleReconnect();
+        }
+    });
     // 1. 准备好所有需要的信号槽
     connect(&websocketClient, &QWebSocket::connected, this, [=]() {
         LOG() << "websocket 连接成功!";
         // 不要忘记! 在 websocket 连接成功之后, 发送身份认证消息!
         sendAuth();
+        authenticationTimer.start();
     });
 
     connect(&websocketClient, &QWebSocket::disconnected, this, [=]() {
         LOG() << "websocket 连接断开!";
+        authenticated = false;
+        pendingDeliveryAcks.clear();
+        authenticationTimer.stop();
+        if (websocketClient.closeCode() == QWebSocketProtocol::CloseCodePolicyViolated) {
+            expireLogin();
+            return;
+        }
+        scheduleReconnect();
     });
 
     connect(&websocketClient, &QWebSocket::errorOccurred, this, [=](QAbstractSocket::SocketError error) {
-        LOG() << "websocket 连接出错!" << error;
+        LOG() << "websocket 连接出错!" << error << websocketClient.errorString();
+        scheduleReconnect();
     });
 
     connect(&websocketClient, &QWebSocket::textMessageReceived, this, [=](const QString& message) {
@@ -67,22 +106,66 @@ void NetClient::initWebsocket()
     connect(&websocketClient, &QWebSocket::binaryMessageReceived, this, [=](const QByteArray& byteArray) {
         LOG() << "websocket 收到二进制消息!" << byteArray.length();
         bite_im::NotifyMessage notifyMessage;
-        notifyMessage.deserialize(&serializer, byteArray);
+        if (!notifyMessage.deserialize(&serializer, byteArray)) return;
         handleWsResponse(notifyMessage);
     });
 
     // 2. 和服务器真正建立连接
+    emit dataCenter->realtimeConnectionChanged(false, "正在连接消息服务");
     websocketClient.open(WEBSOCKET_URL);
+}
+
+void NetClient::scheduleReconnect()
+{
+    if (!reconnectEnabled || reconnectTimer.isActive()) return;
+    emit dataCenter->realtimeConnectionChanged(false, "消息连接断开，正在重连");
+    reconnectTimer.start(reconnectDelay);
+    reconnectDelay = std::min(reconnectDelay * 2, 30000);
+}
+
+void NetClient::expireLogin()
+{
+    reconnectEnabled = false;
+    authenticated = false;
+    reconnectTimer.stop();
+    authenticationTimer.stop();
+    dataCenter->resetLoginSessionId("");
+    pendingDeliveryAcks.clear();
+    emit dataCenter->realtimeConnectionChanged(false, "登录已失效，请重新启动客户端登录");
 }
 
 void NetClient::closeWebsocket()
 {
+    reconnectEnabled = false;
+    authenticated = false;
+    pendingDeliveryAcks.clear();
+    reconnectTimer.stop();
+    authenticationTimer.stop();
     websocketClient.close();
     LOG() << "close websocket";
 }
 
 void NetClient::handleWsResponse(const bite_im::NotifyMessage &notifyMessage)
 {
+    if (notifyMessage.notifyType() == bite_im::NotifyTypeGadget::NotifyType::AUTHENTICATION_NOTIFY) {
+        authenticationTimer.stop();
+        if (!notifyMessage.authentication().success()) { expireLogin(); return; }
+        authenticated = true;
+        reconnectDelay = 1000;
+        // HTTP workers can enqueue a push between connection registration and
+        // the auth reply. Confirm already-cached envelopes after auth succeeds.
+        const auto pending = pendingDeliveryAcks;
+        pendingDeliveryAcks.clear();
+        for (const auto& messageId : pending) sendDeliveryAck(messageId);
+        emit dataCenter->realtimeConnectionChanged(true, "");
+        return;
+    }
+    if (notifyMessage.notifyType() == bite_im::NotifyTypeGadget::NotifyType::MESSAGE_DELIVERY_NOTIFY) {
+        const auto receipt = notifyMessage.deliveryReceipt();
+        if (receipt.deliveredTargetCount() > 0)
+            dataCenter->updateMessageStatus(receipt.clientMessageId(), receipt.messageId(), DeliveryStatus::DELIVERED);
+        return;
+    }
     if (notifyMessage.notifyType() == bite_im::NotifyTypeGadget::NotifyType::CHAT_MESSAGE_NOTIFY) {
         // 收到消息
         // 1. 把 pb 中的 MessageInfo 转成客户端自己的 Message
@@ -115,19 +198,26 @@ void NetClient::handleWsResponse(const bite_im::NotifyMessage &notifyMessage)
 
 void NetClient::handleWsMessage(const model::Message &message)
 {
-    // 这里要考虑两个情况
-    QList<Message>* messageList = dataCenter->getRecentMessageList(message.chatSessionId);
-    if (messageList == nullptr) {
-        // 1. 如果当前这个消息所属的会话, 里面的消息列表, 没有在本地加载, 此时就需要通过网络先加载整个消息列表.
-        connect(dataCenter, &DataCenter::getRecentMessageListDoneNoUI, this, &NetClient::receiveMessage, Qt::UniqueConnection);
-        dataCenter->getRecentMessageListAsync(message.chatSessionId, false);
-    } else {
-        // 2. 如果当前这个消息所属的会话, 里面的消息已经在本地加载了, 直接把这个消息尾插到消息列表中即可.
-        if (!dataCenter->addMessage(message)) {
-            return;
-        }
-        this->receiveMessage(message.chatSessionId);
+    if (message.messageId.isEmpty() || message.chatSessionId.isEmpty() || message.sender.userId.isEmpty()) return;
+    const bool unloaded = dataCenter->getRecentMessageList(message.chatSessionId) == nullptr;
+    const bool added = dataCenter->addMessage(message);
+    // ACK only after the envelope has been accepted into the local message cache.
+    // Duplicates still need an ACK, but must not increment unread counts twice.
+    if (websocketClient.state() == QAbstractSocket::ConnectedState) {
+        if (authenticated) sendDeliveryAck(message.messageId);
+        else if (pendingDeliveryAcks.size() < 1000) pendingDeliveryAcks.insert(message.messageId);
     }
+    if (added) receiveMessage(message.chatSessionId);
+    if (unloaded) dataCenter->getRecentMessageListAsync(message.chatSessionId, false);
+}
+
+void NetClient::sendDeliveryAck(const QString& messageId)
+{
+    bite_im::ClientDeliveryAck ack;
+    ack.setMessageId(messageId);
+    bite_im::ClientAuthenticationReq frame;
+    frame.setDeliveryAck(ack);
+    websocketClient.sendBinaryMessage(frame.serialize(&serializer));
 }
 
 void NetClient::handleWsRemoveFriend(const QString &userId)

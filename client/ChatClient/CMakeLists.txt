@@ -42,7 +42,7 @@ if(${QT_VERSION_MAJOR} GREATER_EQUAL 6)
         phoneloginwidget.h phoneloginwidget.cpp
         toast.h toast.cpp
         model/datacenter.h model/datacenter.cpp
-        network/netclient.h network/netclient.cpp
+        network/NetClient.h network/NetClient.cpp
         verifycodewidget.h verifycodewidget.cpp
         soundrecorder.h soundrecorder.cpp
     )
