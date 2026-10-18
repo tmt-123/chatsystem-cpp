@@ -81,6 +81,24 @@ TEST_F(ESIndexTest, ConcurrentInitializersAgree) {
     one.join(); two.join();
     EXPECT_EQ(succeeded.load(), 2);
 }
+
+TEST_F(ESIndexTest, SharedClientConcurrentWritesKeepDocumentIdentity) {
+    ASSERT_TRUE(ESIndex(client, name).append("id", "keyword").append("content", "text", "standard").create());
+    std::atomic<int> errors{0};
+    std::vector<std::thread> threads;
+    for (int i = 0; i < 8; ++i) threads.emplace_back([&, i] {
+        for (int j = 0; j < 20; ++j) {
+            const auto id = std::to_string(i) + "-" + std::to_string(j);
+            if (!bite_im::ESInsert(client, name).append("id", id).append("content", id).insert(id)) ++errors;
+        }
+    });
+    for (auto &thread : threads) thread.join();
+    ASSERT_EQ(errors.load(), 0);
+    for (int i = 0; i < 8; ++i) for (int j = 0; j < 20; ++j) {
+        const auto id = std::to_string(i) + "-" + std::to_string(j);
+        EXPECT_EQ(get(name + "/_doc/" + id)["_source"]["id"].asString(), id);
+    }
+}
 int main(int argc, char** argv) {
     bite_im::init_logger(false, "", spdlog::level::critical);
     bite_im::g_default_logger->set_level(spdlog::level::critical);

@@ -67,12 +67,13 @@ class Message {
         unsigned long _id;
         #pragma db type("varchar(64)") index unique
         std::string _message_id;
-        #pragma db type("varchar(64)") index unique
-        std::string _client_message_id;         //客户端幂等ID
+        #pragma db type("varchar(64)")
+        std::string _client_message_id;         //客户端幂等ID，作用域为发送者
         #pragma db type("varchar(64)") index
         std::string _session_id;                //所属会话ID
         #pragma db type("varchar(64)")
         std::string _user_id;                   //发送者用户ID
+        #pragma db index("sender_client_message_id_i") unique members(_user_id, _client_message_id)
         unsigned char _message_type;            //消息类型 0-文本；1-图片；2-文件；3-语音
         #pragma db type("TIMESTAMP")
         boost::posix_time::ptime _create_time;  //消息的产生时间

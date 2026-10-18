@@ -42,10 +42,9 @@ class BrokerDeliveryTest(unittest.TestCase):
         self.channel.exchange_delete(self.dead)
         self.connection.close()
 
-    def start_consumer(self, recover=False):
+    def start_consumer(self, recover=False, prefetch=1):
         command = [str(Path(args.probe).resolve()), self.name]
-        if recover:
-            command.append("recover")
+        command.extend(["recover" if recover else getattr(self, 'consumer_mode', 'normal'), str(prefetch)])
         self.process = subprocess.Popen(command, stdout=subprocess.PIPE,
                                         stderr=subprocess.STDOUT, text=True)
         process = self.process
@@ -200,6 +199,85 @@ class BrokerDeliveryTest(unittest.TestCase):
                 break
             pending.add(base_pb2.MessageInfo.FromString(body).client_message_id)
         self.assertEqual(pending, {"outage", "waiting"})
+
+    def test_prefetch_window_retries_each_tag_without_acknowledging_failed_peers(self):
+        self.start_consumer(prefetch=16)
+        expected = {f"mixed-{i}" for i in range(48)}
+        modes = ("success", "es-retry", "mysql-retry", "throw-once")
+        for i in range(48):
+            self.publish(f"mixed-{i}", modes[i % len(modes)])
+        acknowledged = set()
+        deadline = time.monotonic() + 12
+        while acknowledged != expected and time.monotonic() < deadline:
+            try:
+                key, attempt, result, _ = self.events.get(timeout=1)
+            except queue.Empty:
+                continue
+            if result == "ack":
+                self.assertEqual(attempt, 1 if int(key.split('-')[1]) % 4 == 0 else 2)
+                acknowledged.add(key)
+        self.assertEqual(acknowledged, expected, self.output)
+        self.stop_consumer()
+        for key in expected:
+            self.assertEqual(self.output.count("STORED " + key), 1)
+        self.assert_queue_empty()
+
+    def test_prefetch_window_stays_bounded_and_shutdown_requeues_all_unfinished(self):
+        self.start_consumer(prefetch=16)
+        expected = {f"pending-{i}" for i in range(32)}
+        for key in sorted(expected):
+            self.publish(key, "always-retry")
+        first_window = set()
+        deadline = time.monotonic() + 5
+        while len(first_window) < 16 and time.monotonic() < deadline:
+            try:
+                key, _, result, _ = self.events.get(timeout=1)
+            except queue.Empty:
+                continue
+            self.assertEqual(result, "retry")
+            first_window.add(key)
+        self.assertEqual(len(first_window), 16)
+        self.assertEqual(self.channel.queue_declare(self.name, passive=True).method.message_count, 16)
+        self.stop_consumer()
+        actual = set()
+        while True:
+            method, _, body = self.channel.basic_get(self.name, auto_ack=True)
+            if method is None:
+                break
+            actual.add(base_pb2.MessageInfo.FromString(body).client_message_id)
+        self.assertEqual(actual, expected)
+
+    def test_concurrent_publishers_share_only_the_io_thread(self):
+        result = subprocess.run([str(Path(args.probe).resolve()), self.name, "publish"],
+                                capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        actual = []
+        while True:
+            method, _, body = self.channel.basic_get(self.name, auto_ack=True)
+            if method is None:
+                break
+            actual.append(body.decode())
+        self.assertEqual(len(actual), 800)
+        self.assertEqual(len(set(actual)), 800)
+
+    def test_partitioned_workers_run_concurrently_and_keep_fifo_in_each_shard(self):
+        self.consumer_mode = 'partition'
+        self.start_consumer(prefetch=16)
+        for sequence in range(40):
+            for shard in range(4):
+                message = base_pb2.MessageInfo(message_id=f'p-{shard}-{sequence}',
+                    client_message_id=f'p-{shard}-{sequence}', chat_session_id=str(shard))
+                message.sender.user_id = 'sender'
+                message.message.message_type = base_pb2.STRING
+                message.message.string_message.content = str(sequence)
+                self.channel.basic_publish('', self.name, message.SerializeToString())
+        self.assertEqual(self.process.wait(timeout=15), 0)
+        self.reader.join(timeout=2)
+        result = next(row for row in self.output if row.startswith('RESULT ')).split()
+        self.assertGreater(int(result[1]), 1)
+        self.assertEqual(result[2:], ['0', '160'])
+        self.assertEqual(sum(row.startswith('STORED ') for row in self.output), 160)
+        self.assert_queue_empty()
 
 
 if __name__ == "__main__":

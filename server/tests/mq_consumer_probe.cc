@@ -6,6 +6,8 @@
 #include <set>
 #include <stdexcept>
 #include <thread>
+#include <vector>
+#include <mutex>
 
 #include "consume_result.hpp"
 #include "message_persistence.hpp"
@@ -23,13 +25,62 @@ int main(int argc, char** argv) {
     std::signal(SIGTERM, stop);
     std::signal(SIGINT, stop);
     const bool recovering = argc > 2 && std::string(argv[2]) == "recover";
+    const uint16_t prefetch = argc > 3 ? static_cast<uint16_t>(std::stoi(argv[3])) : 1;
     bite_im::init_logger(false, "", spdlog::level::critical);
     bite_im::g_default_logger->set_level(spdlog::level::critical);
+
+    if (argc > 2 && std::string(argv[2]) == "publish") {
+        bite_im::MQClient publisher("guest", "guest", "127.0.0.1:5672");
+        std::atomic<int> errors{0};
+        std::vector<std::thread> threads;
+        for (int i = 0; i < 8; ++i) threads.emplace_back([&, i] {
+            for (int j = 0; j < 100; ++j) {
+                if (!publisher.publish("", "pub:" + std::to_string(i) + ":" + std::to_string(j), argv[1])) ++errors;
+            }
+        });
+        for (auto &thread : threads) thread.join();
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        publisher.shutdown();
+        try { publisher.publish("", "must-not-hang", argv[1]); return 4; }
+        catch (const std::logic_error&) {}
+        return errors == 0 ? 0 : 3;
+    }
+
+    if (argc > 2 && std::string(argv[2]) == "partition") {
+        bite_im::MQClient consumer("guest", "guest", "127.0.0.1:5672");
+        std::atomic<int> active{0}, peak{0}, completed{0}, violations{0};
+        std::vector<int> next(4, 0);
+        std::mutex output;
+        consumer.consumePartitioned(argv[1], [&](const char *body, size_t size, std::size_t shard) {
+            bite_im::MessageInfo msg;
+            if (!msg.ParseFromArray(body, static_cast<int>(size))) return bite_im::ConsumeResult::Reject;
+            const int count = ++active;
+            int observed = peak.load();
+            while (observed < count && !peak.compare_exchange_weak(observed, count)) {}
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            if (std::stoi(msg.chat_session_id()) != static_cast<int>(shard) ||
+                std::stoi(msg.message().string_message().content()) != next[shard]++) ++violations;
+            { std::lock_guard<std::mutex> lock(output); std::cout << "STORED " << msg.client_message_id() << std::endl; }
+            --active;
+            ++completed;
+            return bite_im::ConsumeResult::Ack;
+        }, 4, 16, [](const char *body, size_t size) -> std::size_t {
+            bite_im::MessageInfo msg;
+            return msg.ParseFromArray(body, static_cast<int>(size)) ? std::stoul(msg.chat_session_id()) : 0;
+        });
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(12);
+        while (completed < 160 && !stop_requested && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        consumer.shutdown();
+        std::cout << "RESULT " << peak << ' ' << violations << ' ' << completed << std::endl;
+        return violations == 0 && completed == 160 && peak > 1 ? 0 : 5;
+    }
 
     std::map<std::string, int> attempts, text_writes, record_writes, file_writes;
     std::set<std::string> saved;
     bite_im::MessagePersistence persistence(
-        [&](const std::string& id) { return saved.count(id) != 0; },
+        [&](const bite_im::MessageInfo& msg) { return saved.count(msg.client_message_id()) != 0; },
         [&](const bite_im::MessageInfo& msg) {
             const auto& mode = msg.message().string_message().content();
             return !(mode == "es-retry" && ++text_writes[msg.client_message_id()] == 1);
@@ -65,7 +116,7 @@ int main(int argc, char** argv) {
                             result == bite_im::ConsumeResult::Reject ? "reject" : "retry";
         std::cout << "EVENT " << key << ' ' << attempt << ' ' << label << std::endl;
         return result;
-    });
+    }, prefetch);
 
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(25);
     while (!stop_requested && std::chrono::steady_clock::now() < deadline) {

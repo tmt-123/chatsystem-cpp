@@ -8,6 +8,9 @@
 //                            (DMS短信/ES/MySQL/Redis/服务发现/服务注册/RPC服务器)
 #include <brpc/server.h>
 #include <butil/logging.h>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 
 #include "data_es.hpp"      // es数据管理客户端封装
 #include "data_redis.hpp"      // redis数据管理客户端封装
@@ -45,8 +48,25 @@ class UserServiceImpl : public bite_im::UserService {
             _mm_channels(channel_manager),
             _dms_client(dms_client){
             if (!_es_user->createIndex()) throw std::runtime_error("user ES index initialization failed");
+            _index_thread = std::thread([this] {
+                std::unique_lock<std::mutex> lock(_index_mutex);
+                while (!_index_stopping) {
+                    lock.unlock();
+                    const bool ok = _mysql_user->indexPending([this](User &user) {
+                        return _es_user->appendData(user.user_id(), user.phone(), user.nickname(),
+                                                    user.description(), user.avatar_id());
+                    });
+                    lock.lock();
+                    _index_wake.wait_for(lock, std::chrono::milliseconds(ok ? 200 : 1000),
+                                        [this] { return _index_stopping; });
+                }
+            });
         }
-        ~UserServiceImpl(){}
+        ~UserServiceImpl(){
+            { std::lock_guard<std::mutex> lock(_index_mutex); _index_stopping = true; }
+            _index_wake.notify_all();
+            if (_index_thread.joinable()) _index_thread.join();
+        }
         //校验昵称格式：长度需小于22个字符
         bool nickname_check(const std::string &nickname) {
             return nickname.size() < 22;
@@ -120,12 +140,8 @@ class UserServiceImpl : public bite_im::UserService {
                 LOG_ERROR("{} - Mysql数据库新增数据失败！", request->request_id());
                 return err_response(request->request_id(), "Mysql数据库新增数据失败!");
             }
-            //6. 向 ES 服务器中新增用户信息
-            ret = _es_user->appendData(uid, "", nickname, "", "");
-            if (ret == false) {
-                LOG_ERROR("{} - ES搜索引擎新增数据失败！", request->request_id());
-                return err_response(request->request_id(), "ES搜索引擎新增数据失败！");
-            }
+            // ES is an eventually consistent search projection. The committed
+            // outbox survives failures; registration success depends on MySQL.
             //7. 组织响应，进行成功与否的响应即可。
             response->set_request_id(request->request_id());
             response->set_success(true);
@@ -281,12 +297,7 @@ class UserServiceImpl : public bite_im::UserService {
                 LOG_ERROR("{} - 向数据库添加用户信息失败！", request->request_id());
                 return err_response(request->request_id(), "向数据库添加用户信息失败!");
             }
-            // 6. 向 ES 服务器中新增用户信息
-            ret = _es_user->appendData(uid, phone, uid, "", "");
-            if (ret == false) {
-                LOG_ERROR("{} - ES搜索引擎新增数据失败！", request->request_id());
-                return err_response(request->request_id(), "ES搜索引擎新增数据失败！");
-            }
+            // The same transaction has durably queued the search update.
             //7. 组织响应，进行成功与否的响应即可。
             response->set_request_id(request->request_id());
             response->set_success(true);
@@ -512,13 +523,7 @@ class UserServiceImpl : public bite_im::UserService {
                 LOG_ERROR("{} - 更新数据库用户头像ID失败 ：{}！", request->request_id(), avatar_id);
                 return err_response(request->request_id(), "更新数据库用户头像ID失败!");
             }
-            // 5. 更新 ES 服务器中用户信息
-            ret = _es_user->appendData(user->user_id(), user->phone(),
-                user->nickname(), user->description(), user->avatar_id());
-            if (ret == false) {
-                LOG_ERROR("{} - 更新搜索引擎用户头像ID失败 ：{}！", request->request_id(), avatar_id);
-                return err_response(request->request_id(), "更新搜索引擎用户头像ID失败!");
-            }
+            // Search projection is retried from the transactional outbox.
             // 6. 组织响应，返回更新成功与否
             response->set_request_id(request->request_id());
             response->set_success(true);
@@ -559,13 +564,7 @@ class UserServiceImpl : public bite_im::UserService {
                 LOG_ERROR("{} - 更新数据库用户昵称失败 ：{}！", request->request_id(), new_nickname);
                 return err_response(request->request_id(), "更新数据库用户昵称失败!");
             }
-            // 5. 更新 ES 服务器中用户信息
-            ret = _es_user->appendData(user->user_id(), user->phone(),
-                user->nickname(), user->description(), user->avatar_id());
-            if (ret == false) {
-                LOG_ERROR("{} - 更新搜索引擎用户昵称失败 ：{}！", request->request_id(), new_nickname);
-                return err_response(request->request_id(), "更新搜索引擎用户昵称失败!");
-            }
+            // Search projection is retried from the transactional outbox.
             // 6. 组织响应，返回更新成功与否
             response->set_request_id(request->request_id());
             response->set_success(true);
@@ -600,13 +599,7 @@ class UserServiceImpl : public bite_im::UserService {
                 LOG_ERROR("{} - 更新数据库用户签名失败 ：{}！", request->request_id(), new_description);
                 return err_response(request->request_id(), "更新数据库用户签名失败!");
             }
-            // 4. 更新 ES 服务器中用户信息
-            ret = _es_user->appendData(user->user_id(), user->phone(),
-                user->nickname(), user->description(), user->avatar_id());
-            if (ret == false) {
-                LOG_ERROR("{} - 更新搜索引擎用户签名失败 ：{}！", request->request_id(), new_description);
-                return err_response(request->request_id(), "更新搜索引擎用户签名失败!");
-            }
+            // Search projection is retried from the transactional outbox.
             // 5. 组织响应，返回更新成功与否
             response->set_request_id(request->request_id());
             response->set_success(true);
@@ -649,18 +642,16 @@ class UserServiceImpl : public bite_im::UserService {
                 LOG_ERROR("{} - 更新数据库用户手机号失败！", request->request_id());
                 return err_response(request->request_id(), "更新数据库用户手机号失败!");
             }
-            // 5. 更新 ES 服务器中用户信息
-            ret = _es_user->appendData(user->user_id(), user->phone(),
-                user->nickname(), user->description(), user->avatar_id());
-            if (ret == false) {
-                LOG_ERROR("{} - 更新搜索引擎用户手机号失败！", request->request_id());
-                return err_response(request->request_id(), "更新搜索引擎用户手机号失败!");
-            }
+            // Search projection is retried from the transactional outbox.
             // 6. 组织响应，返回更新成功与否
             response->set_request_id(request->request_id());
             response->set_success(true);
         }
     private:
+        std::mutex _index_mutex;
+        std::condition_variable _index_wake;
+        std::thread _index_thread;
+        bool _index_stopping = false;
         //业务处理依赖的各数据/服务客户端对象
         ESUser::ptr _es_user;          //ES用户数据管理
         UserTable::ptr _mysql_user;     //MySQL用户数据管理

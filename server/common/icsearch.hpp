@@ -6,10 +6,22 @@
 #include <memory>
 #include <cstdlib>
 #include <unordered_map>
+#include <mutex>
 #include "logger.hpp"
 
 
 namespace bite_im{
+// elasticlient::Client owns a mutable cpr::Session. Serialize all users of
+// the same client, rather than letting concurrent RPCs overwrite its URL/body.
+inline std::shared_ptr<std::mutex> esClientMutex(const std::shared_ptr<elasticlient::Client>& client) {
+    static std::mutex registry_mutex;
+    static std::unordered_map<elasticlient::Client*, std::weak_ptr<std::mutex>> registry;
+    std::lock_guard<std::mutex> lock(registry_mutex);
+    auto& entry = registry[client.get()];
+    auto mutex = entry.lock();
+    if (!mutex) { mutex = std::make_shared<std::mutex>(); entry = mutex; }
+    return mutex;
+}
 inline bool Serialize(const Json::Value &val, std::string &dst)
 {
     //先定义Json::StreamWriter 工厂类 Json::StreamWriterBuilder 
@@ -66,6 +78,8 @@ class ESIndex {
             return it == _exact_fields.end() ? field : it->second;
         }
         bool create() {
+            const auto mutex = esClientMutex(_client);
+            std::lock_guard<std::mutex> lock(*mutex);
             Json::Value mappings;
             mappings["dynamic"] = true;
             mappings["properties"] = _properties;
@@ -153,6 +167,8 @@ class ESInsert {
             return *this;
         }
         bool insert(const std::string id = "") {
+            const auto mutex = esClientMutex(_client);
+            std::lock_guard<std::mutex> lock(*mutex);
             std::string body;
             bool ret = Serialize(_item, body);
             if (ret == false) {
@@ -187,6 +203,8 @@ class ESRemove {
             const std::string &type = "_doc"):
             _name(name), _type(type), _client(client){}
         bool remove(const std::string &id) {
+            const auto mutex = esClientMutex(_client);
+            std::lock_guard<std::mutex> lock(*mutex);
             try {
                 auto rsp = _client->remove(_name, _type, id);
                 if (rsp.status_code < 200 || rsp.status_code >= 300) {
@@ -246,6 +264,8 @@ class ESSearch {
             return *this;
         }
         Json::Value search(){
+            const auto mutex = esClientMutex(_client);
+            std::lock_guard<std::mutex> lock(*mutex);
             Json::Value cond;
             if (_must_not.empty() == false) cond["must_not"] = _must_not;
             if (_should.empty() == false) cond["should"] = _should;

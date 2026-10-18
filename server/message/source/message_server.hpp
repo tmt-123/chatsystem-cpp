@@ -46,13 +46,19 @@ class MessageServiceImpl : public bite_im::MsgStorageService {
             const std::shared_ptr<odb::core::database> &mysql_client,
             const ServiceManager::ptr &channel_manager,
             const std::string &file_service_name,
-            const std::string &user_service_name) :
+            const std::string &user_service_name,
+            const std::vector<std::string> &es_hosts,
+            std::size_t persistence_workers) :
             _es_message(std::make_shared<ESMessage>(es_client)),
             _mysql_message(std::make_shared<MessageTable>(mysql_client)),
             _file_service_name(file_service_name),
             _user_service_name(user_service_name),
             _mm_channels(channel_manager){
             if (!_es_message->createIndex()) throw std::runtime_error("message ES index initialization failed");
+            for (std::size_t i = 0; i < persistence_workers; ++i) {
+                // Independent HTTP sessions: workers never share mutable CPR state.
+                _es_writers.push_back(std::make_shared<ESMessage>(ESClientFactory::create(es_hosts)));
+            }
         }
         ~MessageServiceImpl(){}
         //获取指定会话指定时间范围内的历史消息
@@ -287,13 +293,14 @@ class MessageServiceImpl : public bite_im::MsgStorageService {
         //RabbitMQ消息消费回调:Transmute子服务发来的每条新消息都会触发本方法
         //职责:把新消息持久化到MySQL/ES,文件类消息的二进制转存到文件子服务只留file_id
         //仅在依赖写入完成或记录已存在时允许 MQ ACK；临时失败请求重投。
-        ConsumeResult onMessage(const char *body, size_t sz) {
+        ConsumeResult onMessage(const char *body, size_t sz, std::size_t worker) {
             MessagePersistence persistence(
-                [this](const std::string &client_id) {
-                    return _mysql_message->existsClientMessage(client_id);
-                },
                 [this](const MessageInfo &message) {
-                    return _es_message->appendData(
+                    return _mysql_message->existsClientMessage(
+                        message.sender().user_id(), message.client_message_id());
+                },
+                [this, worker](const MessageInfo &message) {
+                    return _es_writers.at(worker)->appendData(
                         message.sender().user_id(),
                         message.message_id(),
                         message.timestamp(),
@@ -411,6 +418,7 @@ class MessageServiceImpl : public bite_im::MsgStorageService {
         }
     private:
         ESMessage::ptr _es_message;
+        std::vector<ESMessage::ptr> _es_writers;
         MessageTable::ptr _mysql_message;
         //这边是rpc调用客户端相关对象
         std::string _user_service_name;
@@ -436,7 +444,7 @@ class MessageServer {
             _es_client(es_client),
             _mysql_client(mysql_client),
             _rpc_server(server){}
-        ~MessageServer(){}
+        ~MessageServer(){ _mq_client->shutdown(); }
         //搭建RPC服务器，并启动服务器
         void start() {
             _rpc_server->RunUntilAskedToQuit();
@@ -457,6 +465,7 @@ class MessageServerBuilder {
     public:
         //构造es客户端对象
         void make_es_object(const std::vector<std::string> host_list) {
+            _es_hosts = host_list;
             _es_client = ESClientFactory::create(host_list);
         }
         //构造mysql客户端对象
@@ -508,7 +517,8 @@ class MessageServerBuilder {
         //会先校验ES/MySQL/信道管理三模块是否就绪,再创建MessageServiceImpl并注册到brpc服务器
         //注意:本服务跟其他子服务不同,启动RPC服务器之后还会启动MQ消费循环——
         //因为本服务既要响应RPC查询(GetHistoryMsg等),又要作为MQ消费者持久化新消息(onMessage)
-        void make_rpc_server(uint16_t port, int32_t timeout, uint8_t num_threads) {
+        void make_rpc_server(uint16_t port, int32_t timeout, uint8_t num_threads,
+                             uint16_t prefetch = 16, std::size_t persistence_workers = 4) {
             if (!_es_client) {
                 LOG_ERROR("还未初始化ES搜索引擎模块！");
                 abort();
@@ -524,7 +534,8 @@ class MessageServerBuilder {
             _rpc_server = std::make_shared<brpc::Server>();
 
             MessageServiceImpl *msg_service = new MessageServiceImpl(_es_client,
-                _mysql_client, _mm_channels, _file_service_name, _user_service_name);
+                _mysql_client, _mm_channels, _file_service_name, _user_service_name,
+                _es_hosts, persistence_workers);
             int ret = _rpc_server->AddService(msg_service, 
                 brpc::ServiceOwnership::SERVER_OWNS_SERVICE);
             if (ret == -1) {
@@ -543,9 +554,17 @@ class MessageServerBuilder {
             //这一步把MessageServiceImpl::onMessage绑定为RabbitMQ消费回调
             //从此Transmute每publish一条消息,本服务的onMessage就被异步触发做持久化
             //MQ消费通常在独立线程中循环,不会阻塞RPC服务器主线程
-            auto callback = std::bind(&MessageServiceImpl::onMessage, msg_service, 
-                std::placeholders::_1, std::placeholders::_2);
-            _mq_client->consume(_queue_name, callback);
+            auto callback = std::bind(&MessageServiceImpl::onMessage, msg_service,
+                std::placeholders::_1, std::placeholders::_2, std::placeholders::_3);
+            // Different conversations progress independently. FIFO processing
+            // within a shard is not an end-to-end ordering/sequence guarantee.
+            _mq_client->consumePartitioned(_queue_name, callback, persistence_workers, prefetch,
+                [](const char *body, size_t size) -> std::size_t {
+                    MessageInfo message;
+                    if (size > static_cast<size_t>(std::numeric_limits<int>::max()) ||
+                        !message.ParseFromArray(body, static_cast<int>(size))) return 0;
+                    return std::hash<std::string>{}(message.chat_session_id());
+                });
         }
         //构造RPC服务器对象
         MessageServer::ptr build() {
@@ -571,6 +590,7 @@ class MessageServerBuilder {
         Registry::ptr _registry_client;
 
         std::shared_ptr<elasticlient::Client> _es_client;
+        std::vector<std::string> _es_hosts;
         std::shared_ptr<odb::core::database> _mysql_client;
 
         std::string _user_service_name;

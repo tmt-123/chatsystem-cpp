@@ -9,12 +9,13 @@ class MessageTable {
         enum class InsertResult { INSERTED, DUPLICATE, ERROR };
         MessageTable(const std::shared_ptr<odb::core::database> &db): _db(db){}
         ~MessageTable(){}
-        bool existsClientMessage(const std::string &client_message_id) {
+        bool existsClientMessage(const std::string &sender_id, const std::string &client_message_id) {
             try {
                 odb::transaction trans(_db->begin());
                 typedef odb::query<Message> query;
                 std::unique_ptr<Message> message(
-                    _db->query_one<Message>(query::client_message_id == client_message_id));
+                    _db->query_one<Message>(query::user_id == sender_id &&
+                                            query::client_message_id == client_message_id));
                 trans.commit();
                 return static_cast<bool>(message);
             } catch (std::exception &e) {
@@ -28,7 +29,7 @@ class MessageTable {
                 _db->persist(msg);
                 trans.commit();
             }catch (std::exception &e) {
-                if (existsClientMessage(msg.client_message_id())) {
+                if (existsClientMessage(msg.user_id(), msg.client_message_id())) {
                     LOG_INFO("忽略重复消息：{}", msg.client_message_id());
                     return InsertResult::DUPLICATE;
                 }

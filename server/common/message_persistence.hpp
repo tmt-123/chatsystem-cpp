@@ -22,7 +22,7 @@ public:
         std::int64_t file_size = 0;
     };
 
-    using Exists = std::function<bool(const std::string&)>;
+    using Exists = std::function<bool(const MessageInfo&)>;
     using SaveText = std::function<bool(const MessageInfo&)>;
     using SaveFile = std::function<bool(const std::string&, const std::string&,
                                       std::int64_t, std::string&)>;
@@ -48,7 +48,7 @@ public:
         }
 
         try {
-            if (_exists(message.client_message_id())) {
+            if (_exists(message)) {
                 return ConsumeResult::Ack;
             }
 

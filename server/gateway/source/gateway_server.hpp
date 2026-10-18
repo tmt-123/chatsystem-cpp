@@ -128,6 +128,8 @@ namespace bite_im{
                 _ws_server.listen(websocket_port);                                  // TCP 监听 9001
                 _ws_server.start_accept();                                         // 开始接受握手
 
+                // Small protobuf responses should not wait for Nagle/delayed ACK.
+                _http_server.set_tcp_nodelay(true);
                 //--- HTTP 路由注册:每条路径绑定到对应处理函数 ---
                 _http_server.Post(GET_PHONE_VERIFY_CODE  , (httplib::Server::Handler)std::bind(&GatewayServer::GetPhoneVerifyCode         , this, std::placeholders::_1, std::placeholders::_2));
                 _http_server.Post(USERNAME_REGISTER      , (httplib::Server::Handler)std::bind(&GatewayServer::UserRegister               , this, std::placeholders::_1, std::placeholders::_2));
