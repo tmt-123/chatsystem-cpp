@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 #include <mutex>
 #include "logger.hpp"
 
@@ -16,6 +17,14 @@ class ServiceChannel {
             _service_name(name), _index(0){}
         //服务上线了一个节点，则调用append新增信道
         void append(const std::string &host) {
+            append(host, host);
+        }
+        void append(const std::string &instance, const std::string &host) {
+            {
+                std::lock_guard<std::mutex> lock(_mutex);
+                auto it = _hosts.find(instance);
+                if (it != _hosts.end() && it->second.host == host) return;
+            }
             auto channel = std::make_shared<brpc::Channel>();
             brpc::ChannelOptions options;
             options.connect_timeout_ms = -1;
@@ -28,19 +37,30 @@ class ServiceChannel {
                 return;
             }
             std::unique_lock<std::mutex> lock(_mutex);
-            _hosts.insert(std::make_pair(host, channel));
+            auto it = _hosts.find(instance);
+            if (it != _hosts.end()) {
+                if (it->second.host == host) return;
+                for (auto &existing : _channels) {
+                    if (existing == it->second.channel) {
+                        existing = channel;
+                        it->second = {host, channel};
+                        return;
+                    }
+                }
+            }
+            _hosts[instance] = {host, channel};
             _channels.push_back(channel);
         }
         //服务下线了一个节点，则调用remove释放信道
-        void remove(const std::string &host) {
+        void remove(const std::string &instance) {
             std::unique_lock<std::mutex> lock(_mutex);
-            auto it = _hosts.find(host);
+            auto it = _hosts.find(instance);
             if (it == _hosts.end()) {
-                LOG_WARN("{}-{}节点删除信道时，没有找到信道信息！", _service_name, host);
+                LOG_WARN("{}-{}节点删除信道时，没有找到信道信息！", _service_name, instance);
                 return;
             }
             for (auto vit = _channels.begin(); vit != _channels.end(); ++vit) {
-                if (*vit == it->second) {
+                if (*vit == it->second.channel) {
                     _channels.erase(vit);
                     break;
                 }
@@ -54,15 +74,17 @@ class ServiceChannel {
                 LOG_ERROR("当前没有能够提供 {} 服务的节点！", _service_name);
                 return ChannelPtr();
             }
-            int32_t idx = _index++ % _channels.size();
+            const auto idx = _index % _channels.size();
+            _index = (idx + 1) % _channels.size();
             return _channels[idx];
         }
     private:
         std::mutex _mutex;
-        int32_t _index; //当前轮转下标计数器
+        std::size_t _index; //有界轮转下标，避免有符号溢出
         std::string _service_name;//服务名称
         std::vector<ChannelPtr> _channels; //当前服务对应的信道集合
-        std::unordered_map<std::string, ChannelPtr> _hosts; //主机地址与信道映射关系
+        struct Endpoint { std::string host; ChannelPtr channel; };
+        std::unordered_map<std::string, Endpoint> _hosts; //实例键与信道映射关系
 };
 
 //总体的服务信道管理类
@@ -72,13 +94,17 @@ class ServiceManager {
         ServiceManager() {}
         //获取指定服务的节点信道
         ServiceChannel::ChannelPtr choose(const std::string &service_name) {
-            std::unique_lock<std::mutex> lock(_mutex);
-            auto sit = _services.find(service_name);
-            if (sit == _services.end()) {
-                LOG_ERROR("当前没有能够提供 {} 服务的节点！", service_name);
-                return ServiceChannel::ChannelPtr();
+            ServiceChannel::ptr service;
+            {
+                std::lock_guard<std::mutex> lock(_mutex);
+                auto sit = _services.find(service_name);
+                if (sit == _services.end()) {
+                    LOG_ERROR("当前没有能够提供 {} 服务的节点！", service_name);
+                    return ServiceChannel::ChannelPtr();
+                }
+                service = sit->second;
             }
-            return sit->second->choose();
+            return service->choose();
         }
         //先声明，我关注哪些服务的上下线，不关心的就不需要管理了
         void declared(const std::string &service_name) {
@@ -109,7 +135,7 @@ class ServiceManager {
                 LOG_ERROR("新增 {} 服务管理节点失败！", service_name);
                 return ;
             }
-            service->append(host);
+            service->append(service_instance, host);
             LOG_DEBUG("{}-{} 服务上线新节点，进行添加管理！", service_name, host);
         }
         //服务下线时调用的回调接口，从服务信道管理中，删除指定节点信道
@@ -131,7 +157,7 @@ class ServiceManager {
                 }
                 service = sit->second;
             }
-            service->remove(host);
+            service->remove(service_instance);
             LOG_DEBUG("{}-{} 服务下线节点，进行删除管理！", service_name, host);
         }
     private:

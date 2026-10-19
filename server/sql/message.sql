@@ -23,8 +23,8 @@ CREATE TABLE `message` (
 CREATE UNIQUE INDEX `message_id_i`
   ON `message` (`message_id`);
 
-CREATE UNIQUE INDEX `client_message_id_i`
-  ON `message` (`client_message_id`);
+CREATE UNIQUE INDEX `sender_client_message_id_i`
+  ON `message` (`user_id`, `client_message_id`);
 
 CREATE INDEX `session_id_i`
   ON `message` (`session_id`);

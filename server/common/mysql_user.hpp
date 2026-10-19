@@ -1,6 +1,7 @@
 #include "mysql.hpp"
 #include "user.hxx"
 #include "user-odb.hxx"
+#include <functional>
 
 namespace bite_im {
 class UserTable {
@@ -11,6 +12,7 @@ class UserTable {
             try {
                 odb::transaction trans(_db->begin());
                 _db->persist(*user);
+                queueIndex(user->user_id());
                 trans.commit();
             }catch (std::exception &e) {
                 LOG_ERROR("新增用户失败 {}:{}！", user->nickname(),e.what());
@@ -22,6 +24,7 @@ class UserTable {
             try {
                 odb::transaction trans(_db->begin());
                 _db->update(*user);
+                queueIndex(user->user_id());
                 trans.commit();
             }catch (std::exception &e) {
                 LOG_ERROR("更新用户失败 {}:{}！", user->nickname(), e.what());
@@ -96,7 +99,40 @@ class UserTable {
             }
             return res;
         }
+        // Lock user first, just like update(), then process its outbox task.
+        // This serializes indexers for a user and indexes the latest committed
+        // profile. Append-only tasks avoid absent-row/gap-lock insert deadlocks.
+        bool indexPending(const std::function<bool(User&)> &index) {
+            try {
+                std::vector<std::pair<unsigned long, std::string>> ids;
+                {
+                    odb::transaction trans(_db->begin());
+                    auto rows = _db->query<UserIndexTask>("ORDER BY id LIMIT 16");
+                    for (const auto &row : rows) ids.emplace_back(row.id(), row.user_id());
+                    trans.commit();
+                }
+                for (const auto &entry : ids) {
+                    odb::transaction trans(_db->begin());
+                    using user_query = odb::query<User>;
+                    std::unique_ptr<User> user(_db->query_one<User>(
+                        (user_query::user_id == entry.second) + " FOR UPDATE"));
+                    std::unique_ptr<UserIndexTask> task(_db->find<UserIndexTask>(entry.first));
+                    if (!task) { trans.commit(); continue; }
+                    if (user && !index(*user)) return false; // rollback leaves durable retry task
+                    _db->erase<UserIndexTask>(entry.first);
+                    trans.commit();
+                }
+                return true;
+            } catch (const std::exception &e) {
+                LOG_WARN("用户索引同步失败，将从 outbox 重试: {}", e.what());
+                return false;
+            }
+        }
     private:
+        void queueIndex(const std::string &uid) {
+            UserIndexTask task(uid);
+            _db->persist(task);
+        }
         std::shared_ptr<odb::core::database> _db;
 };
 }

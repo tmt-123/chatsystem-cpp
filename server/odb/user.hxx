@@ -5,6 +5,20 @@
 #include <odb/core.hxx>
 
 namespace bite_im {
+#pragma db object table("user_search_outbox")
+class UserIndexTask {
+public:
+    UserIndexTask() = default;
+    explicit UserIndexTask(const std::string &uid): _user_id(uid) {}
+    unsigned long id() const { return _id; }
+    const std::string &user_id() const { return _user_id; }
+private:
+    friend class odb::access;
+    #pragma db id auto
+    unsigned long _id = 0;
+    #pragma db type("varchar(64)") index
+    std::string _user_id;
+};
 #pragma db object table("user")
 class User {
     public:

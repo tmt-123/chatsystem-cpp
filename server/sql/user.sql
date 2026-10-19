@@ -25,3 +25,9 @@ CREATE UNIQUE INDEX `nickname_i`
 CREATE UNIQUE INDEX `phone_i`
   ON `user` (`phone`);
 
+CREATE TABLE IF NOT EXISTS `user_search_outbox` (
+  `id` BIGINT UNSIGNED NOT NULL PRIMARY KEY AUTO_INCREMENT,
+  `user_id` varchar(64) NOT NULL,
+  KEY `user_id_i` (`user_id`)
+) ENGINE=InnoDB;
+

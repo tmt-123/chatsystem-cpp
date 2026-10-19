@@ -37,6 +37,10 @@ set(src_files "")
 aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/source src_files)
 # 5. 声明目标及依赖
 add_executable(${target} ${src_files} ${proto_srcs} ${odb_srcs})
+# select() cannot handle descriptors >= FD_SETSIZE, even with a high nofile limit.
+if(UNIX)
+    add_definitions(-DCPPHTTPLIB_USE_POLL)
+endif()
 # 7. 设置需要连接的库
 target_link_libraries(${target} -lgflags 
     -lspdlog -lfmt -lbrpc -lssl -lcrypto 

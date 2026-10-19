@@ -50,11 +50,11 @@ protected:
 
     MessagePersistence pipeline() {
         return MessagePersistence(
-            [this](const std::string& id) {
+            [this](const MessageInfo& msg) {
                 ++lookups;
-                lookup_id = id;
+                lookup_id = msg.client_message_id();
                 if (throw_at == "lookup") throw std::runtime_error("injected lookup error");
-                return saved.count(id) != 0;
+                return saved.count(msg.sender().user_id() + ":" + lookup_id) != 0;
             },
             [this](const MessageInfo&) {
                 ++text_writes;
@@ -77,7 +77,7 @@ protected:
                 if (!record_ok) return false;
                 stored = body;
                 saved_id = msg.message_id();
-                saved.insert(msg.client_message_id());
+                saved.insert(msg.sender().user_id() + ":" + msg.client_message_id());
                 return true;
             });
     }
@@ -114,7 +114,7 @@ TEST_F(PersistenceTest, MysqlFailureRetriesWithStableIdentity) {
     EXPECT_EQ(process(message()), ConsumeResult::Ack);
     EXPECT_EQ(record_writes, 2);
     EXPECT_EQ(saved_id, "server-id");
-    EXPECT_EQ(saved.count("client-id"), 1u);
+    EXPECT_EQ(saved.count("sender:client-id"), 1u);
 }
 
 TEST_F(PersistenceTest, RedeliveredPersistedMessageDoesNotWriteAgain) {
@@ -122,6 +122,18 @@ TEST_F(PersistenceTest, RedeliveredPersistedMessageDoesNotWriteAgain) {
     EXPECT_EQ(process(message()), ConsumeResult::Ack);
     EXPECT_EQ(text_writes, 1);
     EXPECT_EQ(record_writes, 1);
+}
+
+TEST_F(PersistenceTest, ClientIdIsScopedToSender) {
+    auto first = message();
+    auto second = first;
+    second.set_message_id("another-server-id");
+    second.mutable_sender()->set_user_id("another-sender");
+    EXPECT_EQ(process(first), ConsumeResult::Ack);
+    EXPECT_EQ(process(second), ConsumeResult::Ack);
+    EXPECT_EQ(process(second), ConsumeResult::Ack);
+    EXPECT_EQ(saved.size(), 2u);
+    EXPECT_EQ(record_writes, 2);
 }
 
 TEST_F(PersistenceTest, LegacyMessageUsesServerIdForDeduplication) {

@@ -5,6 +5,10 @@
 #include <etcd/Watcher.hpp>
 #include <etcd/Value.hpp>
 #include <functional>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
+#include <unordered_map>
 #include "logger.hpp"
 
 namespace bite_im{
@@ -15,17 +19,63 @@ class Registry {
         Registry(const std::string &host):
             _client(std::make_shared<etcd::Client>(host)) ,
             _keep_alive(_client->leasekeepalive(3).get()),
-            _lease_id(_keep_alive->Lease()){}
-        ~Registry() { _keep_alive->Cancel(); }
+            _lease_id(_keep_alive->Lease()){
+            _client->set_grpc_timeout(std::chrono::seconds(2));
+            _monitor = std::thread([this] { maintain(); });
+        }
+        ~Registry() {
+            { std::lock_guard<std::mutex> lock(_mutex); _stopping = true; }
+            _wake.notify_all();
+            if (_monitor.joinable()) _monitor.join();
+            _keep_alive->Cancel();
+        }
         bool registry(const std::string &key, const std::string &val) {
+            std::lock_guard<std::mutex> lock(_mutex);
             auto resp = _client->put(key, val, _lease_id).get();
             if (resp.is_ok() == false) {
                 LOG_ERROR("注册数据失败：{}", resp.error_message());
                 return false;
             }
+            _entries[key] = val;
             return true;
         }
     private:
+        void maintain() {
+            std::unique_lock<std::mutex> lock(_mutex);
+            while (!_wake.wait_for(lock, std::chrono::seconds(1), [this] { return _stopping; })) {
+                try {
+                    auto ttl = _client->leasetimetolive(_lease_id).get();
+                    if (!ttl.is_ok()) continue; // transport failure: retry, don't flood new leases
+                    if (ttl.value().ttl() > 0) {
+                        if (_restore_pending) restore();
+                        continue;
+                    }
+                    auto alive = _client->leasekeepalive(3).get();
+                    _keep_alive->Cancel();
+                    _keep_alive = std::move(alive);
+                    _lease_id = _keep_alive->Lease();
+                    LOG_WARN("服务注册租约失效，重新获取租约并恢复实例注册");
+                    _restore_pending = true;
+                    restore();
+                } catch (const std::exception &e) {
+                    LOG_WARN("检查服务注册租约失败: {}", e.what());
+                    continue;
+                }
+            }
+        }
+        void restore() {
+            bool complete = true;
+            for (const auto &entry : _entries) {
+                auto response = _client->put(entry.first, entry.second, _lease_id).get();
+                complete = response.is_ok() && complete;
+            }
+            _restore_pending = !complete;
+        }
+        std::mutex _mutex;
+        std::condition_variable _wake;
+        std::thread _monitor;
+        bool _stopping = false, _restore_pending = false;
+        std::unordered_map<std::string, std::string> _entries;
         std::shared_ptr<etcd::Client> _client;
         std::shared_ptr<etcd::KeepAlive> _keep_alive;
         uint64_t _lease_id;
