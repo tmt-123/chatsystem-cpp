@@ -29,6 +29,37 @@ int main(int argc, char** argv) {
     bite_im::init_logger(false, "", spdlog::level::critical);
     bite_im::g_default_logger->set_level(spdlog::level::critical);
 
+    if (argc > 2 && std::string(argv[2]).rfind("batch", 0) == 0) {
+        const std::string mode = argv[2];
+        bite_im::MQClient client("guest", "guest", "127.0.0.1:5672");
+        std::map<std::string, int> seen;
+        bool invalid_once = mode == "batch-invalid";
+        bool throw_once = mode == "batch-throw";
+        client.consumeBatched(argv[1], [&](const std::vector<std::string> &bodies, std::size_t) {
+            std::cout << "BATCH " << bodies.size() << std::endl;
+            if (invalid_once) { invalid_once = false; return std::vector<bite_im::ConsumeResult>{}; }
+            if (throw_once) { throw_once = false; throw std::runtime_error("batch failed"); }
+            std::vector<bite_im::ConsumeResult> result;
+            for (const auto &body : bodies) {
+                bite_im::MessageInfo msg;
+                if (!msg.ParseFromString(body)) { result.push_back(bite_im::ConsumeResult::Reject); continue; }
+                const auto &key = msg.client_message_id();
+                const auto &content = msg.message().string_message().content();
+                const int attempt = ++seen[key];
+                auto status = content == "always-retry" || (content == "es-retry" && attempt == 1)
+                    ? bite_im::ConsumeResult::Retry : bite_im::ConsumeResult::Ack;
+                result.push_back(status);
+                std::cout << "EVENT " << key << ' ' << attempt << ' '
+                          << (status == bite_im::ConsumeResult::Ack ? "ack" : "retry") << std::endl;
+                if (status == bite_im::ConsumeResult::Ack) std::cout << "STORED " << key << std::endl;
+            }
+            return result;
+        }, 1, prefetch, [](const char*, size_t) { return 0; },
+           8, mode == "batch-stop" ? 1000 : 100, mode == "batch-bytes" ? 1 : 1024 * 1024);
+        while (!stop_requested) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        return 0;
+    }
+
     if (argc > 2 && std::string(argv[2]) == "publish") {
         bite_im::MQClient publisher("guest", "guest", "127.0.0.1:5672");
         std::atomic<int> errors{0};

@@ -279,6 +279,76 @@ class BrokerDeliveryTest(unittest.TestCase):
         self.assertEqual(sum(row.startswith('STORED ') for row in self.output), 160)
         self.assert_queue_empty()
 
+    def test_batch_timeout_flushes_low_volume_without_waiting_for_full_size(self):
+        self.consumer_mode = 'batch'
+        self.start_consumer(prefetch=16)
+        begin = time.monotonic()
+        self.publish('low-volume')
+        self.event('low-volume', 1, 'ack', timeout=2)
+        self.assertLess(time.monotonic() - begin, 1)
+        self.stop_consumer()
+        self.assertIn('BATCH 1', self.output)
+        self.assert_queue_empty()
+
+    def test_batch_size_and_mixed_results_keep_individual_ack_semantics(self):
+        self.consumer_mode = 'batch'
+        self.start_consumer(prefetch=16)
+        for i in range(16):
+            self.publish(f'batch-{i}', 'always-retry' if i % 2 else 'success')
+        acknowledged = set()
+        deadline = time.monotonic() + 3
+        while len(acknowledged) < 8 and time.monotonic() < deadline:
+            key, _, result, _ = self.events.get(timeout=2)
+            if result == 'ack': acknowledged.add(key)
+        self.assertEqual(len(acknowledged), 8)
+        self.stop_consumer()
+        self.assertIn('BATCH 8', self.output)
+        pending = set()
+        while True:
+            method, _, body = self.channel.basic_get(self.name, auto_ack=True)
+            if method is None: break
+            pending.add(base_pb2.MessageInfo.FromString(body).client_message_id)
+        self.assertEqual(pending, {f'batch-{i}' for i in range(16) if i % 2})
+
+    def check_batch_recovers(self, mode):
+        self.consumer_mode = mode
+        self.start_consumer(prefetch=16)
+        for i in range(8): self.publish(f'recover-{i}')
+        acknowledged = set()
+        deadline = time.monotonic() + 5
+        while len(acknowledged) < 8 and time.monotonic() < deadline:
+            key, _, result, _ = self.events.get(timeout=3)
+            if result == 'ack': acknowledged.add(key)
+        self.assertEqual(len(acknowledged), 8)
+        self.stop_consumer()
+        self.assert_queue_empty()
+
+    def test_batch_callback_wrong_length_retries_instead_of_acking(self):
+        self.check_batch_recovers('batch-invalid')
+
+    def test_batch_callback_exception_retries_instead_of_acking(self):
+        self.check_batch_recovers('batch-throw')
+
+    def test_batch_byte_limit_splits_oversized_singletons(self):
+        self.consumer_mode = 'batch-bytes'
+        self.start_consumer(prefetch=16)
+        for i in range(8): self.publish(f'bytes-{i}')
+        for i in range(8): self.event(f'bytes-{i}', 1, 'ack')
+        self.stop_consumer()
+        self.assertEqual(self.output.count('BATCH 1'), 8)
+        self.assert_queue_empty()
+
+    def test_shutdown_during_batch_wait_leaves_selected_delivery_unacknowledged(self):
+        self.consumer_mode = 'batch-stop'
+        self.start_consumer(prefetch=16)
+        self.publish('selected')
+        time.sleep(.2)
+        self.stop_consumer()
+        self.assertNotIn('STORED selected', self.output)
+        method, _, body = self.channel.basic_get(self.name, auto_ack=True)
+        self.assertIsNotNone(method)
+        self.assertEqual(base_pb2.MessageInfo.FromString(body).client_message_id, 'selected')
+
 
 if __name__ == "__main__":
     unittest.main(argv=[sys.argv[0]] + unittest_args, verbosity=2)
