@@ -26,6 +26,7 @@ class MQClient {
         using MessageCallback = std::function<ConsumeResult(const char*, size_t)>;
         using PartitionedCallback = std::function<ConsumeResult(const char*, size_t, std::size_t)>;
         using Partitioner = std::function<std::size_t(const char*, size_t)>;
+        using BatchCallback = std::function<std::vector<ConsumeResult>(const std::vector<std::string>&, std::size_t)>;
         using ptr = std::shared_ptr<MQClient>;
         MQClient(const std::string &user, 
             const std::string passwd,
@@ -130,15 +131,30 @@ class MQClient {
         }
         void consumePartitioned(const std::string &queue, const PartitionedCallback &cb,
                                 std::size_t workers, uint16_t prefetch, const Partitioner &partition) {
+            consumeBatched(queue, [cb](const std::vector<std::string> &bodies, std::size_t shard) {
+                std::vector<ConsumeResult> results;
+                for (const auto &body : bodies) results.push_back(cb(body.data(), body.size(), shard));
+                return results;
+            }, workers, prefetch, partition, 1, 0);
+        }
+        void consumeBatched(const std::string &queue, const BatchCallback &cb,
+                            std::size_t workers, uint16_t prefetch, const Partitioner &partition,
+                            std::size_t batch_size, uint32_t wait_ms,
+                            std::size_t batch_bytes = 1024 * 1024) {
             if (prefetch == 0) throw std::invalid_argument("MQ prefetch must be bounded");
             if (workers == 0 || workers > 64) throw std::invalid_argument("MQ workers must be 1-64");
+            if (batch_size == 0 || batch_size > 1024 || wait_ms > 1000 ||
+                batch_bytes == 0 || batch_bytes > max_work_bytes)
+                throw std::invalid_argument("Invalid MQ batch bounds");
             if (_consumer_started) {
                 throw std::logic_error("MQClient supports one consumer per connection");
             }
             _consumer_started = true;
             _work.resize(workers);
             for (std::size_t i = 0; i < workers; ++i) {
-                _workers.emplace_back([this, cb, i] { work(cb, i); });
+                _workers.emplace_back([this, cb, i, batch_size, wait_ms, batch_bytes] {
+                    work(cb, i, batch_size, wait_ms, batch_bytes);
+                });
             }
             LOG_DEBUG("开始订阅 {} 队列消息！", queue);
             dispatch([this, queue, prefetch, partition] {
@@ -155,7 +171,7 @@ class MQClient {
                         }
                         _work_bytes += message.bodySize();
                         const auto shard = partition(message.body(), message.bodySize()) % _work.size();
-                        _work[shard].push_back({deliveryTag, std::string(message.body(), message.bodySize())});
+                        _work[shard].push_back({deliveryTag, std::string(message.body(), message.bodySize()), Clock::now()});
                     }
                     _work_ready.notify_all();
                 })
@@ -182,23 +198,50 @@ class MQClient {
             }
             ev_async_send(_loop, &_async_watcher);
         }
-        void work(const PartitionedCallback &cb, std::size_t shard) {
+        void work(const BatchCallback &cb, std::size_t shard, std::size_t batch_size,
+                  uint32_t wait_ms, std::size_t batch_bytes) {
             for (;;) {
-                Work item;
+                std::vector<uint64_t> tags;
+                std::vector<std::string> bodies;
+                std::size_t bytes = 0;
                 {
                     std::unique_lock<std::mutex> lock(_work_mutex);
                     _work_ready.wait(lock, [this, shard] { return _worker_stopping || !_work[shard].empty(); });
                     if (_worker_stopping) return;
-                    item = std::move(_work[shard].front()); _work[shard].pop_front();
+                    // Deadline is based on the oldest arrival, not reset by each
+                    // new message. Size=1 preserves the original immediate path.
+                    const auto deadline = _work[shard].front().enqueued + std::chrono::milliseconds(wait_ms);
+                    while (bodies.size() < batch_size) {
+                        if (_worker_stopping) return; // selected tags stay unacked
+                        if (_work[shard].empty()) {
+                            if (!_work_ready.wait_until(lock, deadline, [this, shard] {
+                                return _worker_stopping || !_work[shard].empty();
+                            })) break;
+                            continue;
+                        }
+                        auto &item = _work[shard].front();
+                        if (!bodies.empty() && item.body.size() > batch_bytes - bytes) break;
+                        bytes += item.body.size();
+                        tags.push_back(item.tag);
+                        bodies.push_back(std::move(item.body));
+                        _work[shard].pop_front();
+                        if (bytes >= batch_bytes) break; // oversized singleton is still bounded globally
+                    }
                 }
-                auto result = ConsumeResult::Retry;
-                try { result = cb(item.body.data(), item.body.size(), shard); }
+                std::vector<ConsumeResult> results(tags.size(), ConsumeResult::Retry);
+                try {
+                    auto completed = cb(bodies, shard);
+                    if (completed.size() == tags.size()) results = std::move(completed);
+                    else LOG_ERROR("MQ 批回调结果数量不匹配，保留整批重试");
+                }
                 catch (...) { LOG_ERROR("MQ 消费回调异常，保留消息重试"); }
                 {
                     std::lock_guard<std::mutex> lock(_work_mutex);
-                    _work_bytes -= item.body.size();
+                    _work_bytes -= bytes;
                 }
-                post([this, tag = item.tag, result] { finish(tag, result); });
+                post([this, tags = std::move(tags), results = std::move(results)] {
+                    for (std::size_t i = 0; i < tags.size(); ++i) finish(tags[i], results[i]);
+                });
             }
         }
         void finish(uint64_t tag, ConsumeResult result) {
@@ -227,7 +270,7 @@ class MQClient {
         struct ev_async _async_watcher;
         ev_timer _retry_watcher;
         std::map<uint64_t, Clock::time_point> _retries;
-        struct Work { uint64_t tag = 0; std::string body; };
+        struct Work { uint64_t tag = 0; std::string body; Clock::time_point enqueued; };
         std::vector<std::deque<Work>> _work;
         static constexpr std::size_t max_work_bytes = 64 * 1024 * 1024;
         std::size_t _work_bytes = 0;
