@@ -1,4 +1,5 @@
 #include "icsearch.hpp"
+#include "es_bulk_result.hpp"
 #include "user.hxx"
 #include "message.hxx"
 
@@ -89,6 +90,43 @@ namespace bite_im {
     class ESMessage {
         public:
             using ptr = std::shared_ptr<ESMessage>;
+            struct TextDocument {
+                std::string user_id, message_id, session_id, content;
+                int64_t timestamp;
+            };
+            std::vector<bool> appendBatch(const std::vector<TextDocument> &documents) {
+                std::vector<bool> failed(documents.size(), false);
+                if (documents.empty()) return failed;
+                Json::StreamWriterBuilder writer;
+                writer["indentation"] = "";
+                writer["emitUTF8"] = true;
+                std::string body;
+                std::vector<std::string> ids;
+                for (const auto &document : documents) {
+                    Json::Value action, source;
+                    action["index"]["_id"] = document.message_id;
+                    source["user_id"] = document.user_id;
+                    source["message_id"] = document.message_id;
+                    source["chat_session_id"] = document.session_id;
+                    source["content"] = document.content;
+                    source["create_time"] = static_cast<Json::Int64>(document.timestamp);
+                    body += Json::writeString(writer, action) + "\n" + Json::writeString(writer, source) + "\n";
+                    ids.push_back(document.message_id);
+                }
+                try {
+                    const auto mutex = esClientMutex(_es_client);
+                    std::lock_guard<std::mutex> lock(*mutex);
+                    const auto response = _es_client->performRequest(
+                        elasticlient::Client::HTTPMethod::POST, _index_name + "/_bulk", body);
+                    if (response.status_code < 200 || response.status_code >= 300) return failed;
+                    Json::Value decoded;
+                    if (!UnSerialize(response.text, decoded)) return failed;
+                    return esBulkResult(decoded, ids);
+                } catch (...) {
+                    LOG_WARN("ES Bulk 请求失败，保留消息重试");
+                    return failed;
+                }
+            }
             ESMessage(const std::shared_ptr<elasticlient::Client> &es_client):
                 _index_name(ESIndex::environment("SOARIM_ES_MESSAGE_INDEX", "message")), _es_client(es_client){}
             bool createIndex() {

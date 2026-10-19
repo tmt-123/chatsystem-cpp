@@ -3,6 +3,7 @@
 #include <chrono>
 #include <thread>
 #include "icsearch.hpp"
+#include "data_es.hpp"
 
 using bite_im::ESIndex;
 using Method = elasticlient::Client::HTTPMethod;
@@ -98,6 +99,37 @@ TEST_F(ESIndexTest, SharedClientConcurrentWritesKeepDocumentIdentity) {
         const auto id = std::to_string(i) + "-" + std::to_string(j);
         EXPECT_EQ(get(name + "/_doc/" + id)["_source"]["id"].asString(), id);
     }
+}
+TEST_F(ESIndexTest, BulkPreservesUnicodeAndReturnsEachItemStatus) {
+    // ESMessage selects its index at construction; use an isolated temporary index.
+    setenv("SOARIM_ES_MESSAGE_INDEX", name.c_str(), 1);
+    bite_im::ESMessage messages(client);
+    unsetenv("SOARIM_ES_MESSAGE_INDEX");
+    ASSERT_TRUE(messages.createIndex());
+    const auto result = messages.appendBatch({
+        {"sender", "bulk-one", "chat", "中文😀\nline", 123},
+        {"sender", "bulk-two", "chat", "second", 124}});
+    EXPECT_EQ(result, (std::vector<bool>{true, true}));
+    EXPECT_EQ(get(name + "/_doc/bulk-one")["_source"]["content"].asString(), "中文😀\nline");
+    auto response = client->performRequest(Method::POST, name + "/_bulk",
+        "{\"index\":{\"_id\":\"bad-time\"}}\n{\"create_time\":\"not-a-number\"}\n"
+        "{\"index\":{\"_id\":\"good-time\"}}\n{\"create_time\":125}\n");
+    ASSERT_EQ(response.status_code, 200);
+    Json::Value partial;
+    ASSERT_TRUE(bite_im::UnSerialize(response.text, partial));
+    EXPECT_EQ(bite_im::esBulkResult(partial, {"bad-time", "good-time"}), (std::vector<bool>{false, true}));
+}
+TEST(BulkResultTest, PartialFailureAndMalformedItemsAreNotAcknowledged) {
+    Json::Value response;
+    ASSERT_TRUE(bite_im::UnSerialize(R"({"errors":true,"items":[{"index":{"_id":"a","status":201}},{"index":{"_id":"b","status":429,"error":{}}},{"index":{"_id":"c","status":201}}]})", response));
+    EXPECT_EQ(bite_im::esBulkResult(response, {"a", "b", "c"}), (std::vector<bool>{true, false, true}));
+    EXPECT_EQ(bite_im::esBulkResult(response, {"a"}), std::vector<bool>{false});
+    response["items"][0] = 7;
+    response["items"][2]["index"]["_id"] = "wrong";
+    EXPECT_EQ(bite_im::esBulkResult(response, {"a", "b", "c"}), std::vector<bool>(3, false));
+    response["items"][2]["index"]["_id"] = "c";
+    response["items"][2]["index"]["status"] = "201";
+    EXPECT_EQ(bite_im::esBulkResult(response, {"a", "b", "c"}), std::vector<bool>(3, false));
 }
 int main(int argc, char** argv) {
     bite_im::init_logger(false, "", spdlog::level::critical);
