@@ -36,6 +36,11 @@ target_link_libraries(message_persistence_test PRIVATE delivery_proto spdlog::sp
                       GTest::gtest Threads::Threads)
 add_test(NAME message_persistence COMMAND message_persistence_test)
 
+add_executable(message_batch_test message_batch_test.cc)
+target_include_directories(message_batch_test PRIVATE ../common)
+target_link_libraries(message_batch_test PRIVATE delivery_proto spdlog::spdlog GTest::gtest Threads::Threads)
+add_test(NAME message_batch COMMAND message_batch_test)
+
 find_package(Boost REQUIRED COMPONENTS system)
 add_executable(delivery_receipts_test delivery_receipts_test.cc)
 target_include_directories(delivery_receipts_test PRIVATE ../common ../gateway/source)
