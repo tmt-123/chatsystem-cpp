@@ -24,6 +24,10 @@ CMakeUserPresets.json
 *.pdb
 *.ilk
 
+# Python benchmark/test bytecode
+__pycache__/
+*.py[cod]
+
 # Local editor and OS files; shared editor tasks may still be committed
 .vs/
 .idea/
