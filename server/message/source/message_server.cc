@@ -36,6 +36,9 @@ DEFINE_string(mq_msg_queue, "msg_queue", "持久化消息的发布队列名称")
 DEFINE_string(mq_msg_binding_key, "msg_queue", "持久化消息的发布队列名称");
 DEFINE_uint32(mq_prefetch, 16, "每个消费者最多未确认消息数，范围1-65535");
 DEFINE_uint32(persistence_workers, 4, "消息存储工作分片数，范围1-64");
+DEFINE_uint32(persistence_batch_size, 16, "每分片微批条数1-1024，1保留原单条路径");
+DEFINE_uint32(persistence_batch_wait_ms, 10, "微批最老消息聚合等待上限0-1000ms，不含依赖处理时间");
+DEFINE_bool(persistence_sql_batch, true, "文本微批使用同一MySQL事务，false用于逐条事务对照");
 
 
 int main(int argc, char *argv[])
@@ -43,8 +46,10 @@ int main(int argc, char *argv[])
     google::ParseCommandLineFlags(&argc, &argv, true);
     bite_im::init_logger(FLAGS_run_mode, FLAGS_log_file, FLAGS_log_level);
     if (FLAGS_mq_prefetch == 0 || FLAGS_mq_prefetch > 65535 ||
-        FLAGS_persistence_workers == 0 || FLAGS_persistence_workers > 64) {
-        LOG_ERROR("mq_prefetch 必须在1-65535范围内，persistence_workers必须在1-64范围内");
+        FLAGS_persistence_workers == 0 || FLAGS_persistence_workers > 64 ||
+        FLAGS_persistence_batch_size == 0 || FLAGS_persistence_batch_size > 1024 ||
+        FLAGS_persistence_batch_wait_ms > 1000) {
+        LOG_ERROR("无效消息存储参数：prefetch=1-65535, workers=1-64, batch_size=1-1024, wait_ms=0-1000");
         return 1;
     }
 
@@ -56,7 +61,8 @@ int main(int argc, char *argv[])
         FLAGS_mysql_db, FLAGS_mysql_cset, FLAGS_mysql_port, FLAGS_mysql_pool_count);
     msb.make_discovery_object(FLAGS_registry_host, FLAGS_base_service, FLAGS_file_service, FLAGS_user_service);
     msb.make_rpc_server(FLAGS_listen_port, FLAGS_rpc_timeout, FLAGS_rpc_threads,
-                        static_cast<uint16_t>(FLAGS_mq_prefetch), FLAGS_persistence_workers);
+                        static_cast<uint16_t>(FLAGS_mq_prefetch), FLAGS_persistence_workers,
+                        FLAGS_persistence_batch_size, FLAGS_persistence_batch_wait_ms, FLAGS_persistence_sql_batch);
     msb.make_registry_object(FLAGS_registry_host, FLAGS_base_service + FLAGS_instance_name, FLAGS_access_host);
     auto server = msb.build();
     server->start();

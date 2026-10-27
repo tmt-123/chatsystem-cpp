@@ -35,17 +35,7 @@ public:
 
     ConsumeResult process(const char* body, std::size_t size) const {
         MessageInfo message;
-        if (size > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
-            !message.ParseFromArray(body, static_cast<int>(size)) ||
-            message.message_id().empty() || message.chat_session_id().empty() ||
-            message.sender().user_id().empty() || !validContent(message)) {
-            LOG_ERROR("拒绝无效的 MQ 消息，不进行重投");
-            return ConsumeResult::Reject;
-        }
-        if (message.client_message_id().empty()) {
-            // Compatibility with messages queued before client IDs were added.
-            message.set_client_message_id(message.message_id());
-        }
+        if (!decode(body, size, message)) return ConsumeResult::Reject;
 
         try {
             if (_exists(message)) {
@@ -93,6 +83,29 @@ public:
             LOG_ERROR("消息持久化抛出异常，保留消息以便重试");
             return ConsumeResult::Retry;
         }
+    }
+
+    static bool decode(const char* body, std::size_t size, MessageInfo &message) {
+        if (size > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+            !message.ParseFromArray(body, static_cast<int>(size)) ||
+            message.message_id().empty() || message.chat_session_id().empty() ||
+            message.sender().user_id().empty() || !validContent(message)) {
+            LOG_ERROR("拒绝无效的 MQ 消息，不进行重投");
+            return false;
+        }
+        if (message.client_message_id().empty()) {
+            // Compatibility with messages queued before client IDs were added.
+            message.set_client_message_id(message.message_id());
+        }
+        // Bound the fields that become VARCHAR(64)/TEXT before aggregation.
+        // Otherwise one permanently unpersistable text can repeatedly roll
+        // back healthy peers in the same SQL transaction.
+        if (message.message_id().size() > 64 || message.client_message_id().size() > 64 ||
+            message.chat_session_id().size() > 64 || message.sender().user_id().size() > 64 ||
+            (message.message().message_type() == MessageType::STRING &&
+             message.message().string_message().content().size() > 65535)) return false;
+
+        return true;
     }
 
 private:

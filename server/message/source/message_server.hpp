@@ -16,6 +16,7 @@
 //  - 本服务无WebSocket连接状态,可像其他子服务一样多实例横向扩容+RR负载均衡
 #include <brpc/server.h>
 #include <butil/logging.h>
+#include <bvar/bvar.h>
 
 //--------------- 外部依赖模块 ---------------
 #include "data_es.hpp"            // es数据管理客户端封装(文本消息关键字搜索+存储)
@@ -26,6 +27,7 @@
 #include "channel.hpp"  // 信道管理模块封装(发现并选择文件/用户子服务节点)
 #include "rabbitmq.hpp" // RabbitMQ客户端封装(消费Transmute发布的消息做持久化)
 #include "message_persistence.hpp"
+#include "message_batch.hpp"
 
 //--------------- protobuf协议契约 ---------------
 #include "message.pb.h"  // protobuf框架代码 - 本服务协议(MsgStorageService)
@@ -327,6 +329,48 @@ class MessageServiceImpl : public bite_im::MsgStorageService {
                 });
             return persistence.process(body, sz);
         }
+        std::vector<ConsumeResult> onBatch(const std::vector<std::string> &bodies,
+                                           std::size_t worker, bool sql_batch) {
+            const auto started = std::chrono::steady_clock::now();
+            MessageBatch pipeline(
+                [this](const MessageInfo &message) {
+                    return _mysql_message->existsClientMessage(
+                        message.sender().user_id(), message.client_message_id());
+                },
+                [this, worker](const std::vector<MessageInfo> &messages) {
+                    std::vector<ESMessage::TextDocument> documents;
+                    for (const auto &message : messages) documents.push_back({
+                        message.sender().user_id(), message.message_id(), message.chat_session_id(),
+                        message.message().string_message().content(), message.timestamp()});
+                    return _es_writers.at(worker)->appendBatch(documents);
+                },
+                [this, sql_batch](const std::vector<MessageInfo> &messages) {
+                    std::vector<bite_im::Message> records;
+                    for (const auto &message : messages) {
+                        records.emplace_back(message.message_id(), message.client_message_id(),
+                            message.chat_session_id(), message.sender().user_id(), MessageType::STRING,
+                            boost::posix_time::from_time_t(message.timestamp()));
+                        records.back().content(message.message().string_message().content());
+                    }
+                    if (sql_batch) return std::vector<bool>(records.size(), _mysql_message->insertBatch(records));
+                    std::vector<bool> result;
+                    for (auto &record : records)
+                        result.push_back(_mysql_message->insert(record) != MessageTable::InsertResult::ERROR);
+                    return result;
+                },
+                [this, worker](const std::string &body) { return onMessage(body.data(), body.size(), worker); });
+            auto result = pipeline.process(bodies);
+            _persist_batches << 1;
+            _persist_items << bodies.size();
+            for (auto status : result) {
+                if (status == ConsumeResult::Ack) _persist_acks << 1;
+                else if (status == ConsumeResult::Retry) _persist_retries << 1;
+                else _persist_rejects << 1;
+            }
+            _persist_latency << std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - started).count();
+            return result;
+        }
     private:
         //批量获取多个用户的信息(供GetHistoryMsg/GetRecentMsg/MsgSearch组装sender字段用)
         //内部走标准RPC三人组:choose channel→构造UserService_Stub→stub.GetMultiUserInfo
@@ -418,6 +462,14 @@ class MessageServiceImpl : public bite_im::MsgStorageService {
         }
     private:
         ESMessage::ptr _es_message;
+        // Native brpc /vars counters: callback batches/items and processing time,
+        // not end-to-end queue latency, unique messages or broker confirms.
+        bvar::Adder<int64_t> _persist_batches{"message_persist_batches"};
+        bvar::Adder<int64_t> _persist_items{"message_persist_items"};
+        bvar::Adder<int64_t> _persist_acks{"message_persist_acks"};
+        bvar::Adder<int64_t> _persist_retries{"message_persist_retries"};
+        bvar::Adder<int64_t> _persist_rejects{"message_persist_rejects"};
+        bvar::LatencyRecorder _persist_latency{"message_persist_callback"};
         std::vector<ESMessage::ptr> _es_writers;
         MessageTable::ptr _mysql_message;
         //这边是rpc调用客户端相关对象
@@ -518,7 +570,8 @@ class MessageServerBuilder {
         //注意:本服务跟其他子服务不同,启动RPC服务器之后还会启动MQ消费循环——
         //因为本服务既要响应RPC查询(GetHistoryMsg等),又要作为MQ消费者持久化新消息(onMessage)
         void make_rpc_server(uint16_t port, int32_t timeout, uint8_t num_threads,
-                             uint16_t prefetch = 16, std::size_t persistence_workers = 4) {
+                             uint16_t prefetch = 16, std::size_t persistence_workers = 4,
+                             std::size_t batch_size = 16, uint32_t batch_wait_ms = 10, bool sql_batch = true) {
             if (!_es_client) {
                 LOG_ERROR("还未初始化ES搜索引擎模块！");
                 abort();
@@ -554,17 +607,25 @@ class MessageServerBuilder {
             //这一步把MessageServiceImpl::onMessage绑定为RabbitMQ消费回调
             //从此Transmute每publish一条消息,本服务的onMessage就被异步触发做持久化
             //MQ消费通常在独立线程中循环,不会阻塞RPC服务器主线程
-            auto callback = std::bind(&MessageServiceImpl::onMessage, msg_service,
-                std::placeholders::_1, std::placeholders::_2, std::placeholders::_3);
             // Different conversations progress independently. FIFO processing
             // within a shard is not an end-to-end ordering/sequence guarantee.
-            _mq_client->consumePartitioned(_queue_name, callback, persistence_workers, prefetch,
-                [](const char *body, size_t size) -> std::size_t {
+            auto partition = [](const char *body, size_t size) -> std::size_t {
                     MessageInfo message;
                     if (size > static_cast<size_t>(std::numeric_limits<int>::max()) ||
                         !message.ParseFromArray(body, static_cast<int>(size))) return 0;
                     return std::hash<std::string>{}(message.chat_session_id());
-                });
+                };
+            if (batch_size == 1) {
+                _mq_client->consumePartitioned(_queue_name,
+                    [msg_service](const char *body, size_t size, std::size_t shard) {
+                        return msg_service->onMessage(body, size, shard);
+                    }, persistence_workers, prefetch, partition);
+            } else {
+                _mq_client->consumeBatched(_queue_name,
+                    [msg_service, sql_batch](const std::vector<std::string> &bodies, std::size_t shard) {
+                        return msg_service->onBatch(bodies, shard, sql_batch);
+                    }, persistence_workers, prefetch, partition, batch_size, batch_wait_ms);
+            }
         }
         //构造RPC服务器对象
         MessageServer::ptr build() {

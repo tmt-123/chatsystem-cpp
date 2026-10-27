@@ -9,6 +9,20 @@ class MessageTable {
         enum class InsertResult { INSERTED, DUPLICATE, ERROR };
         MessageTable(const std::shared_ptr<odb::core::database> &db): _db(db){}
         ~MessageTable(){}
+        // Atomic transaction, not INSERT IGNORE: truncation and other errors
+        // cannot silently turn into success. A uniqueness race rolls back all
+        // rows; redelivery rechecks committed sender-scoped identities.
+        bool insertBatch(std::vector<Message> &messages) {
+            try {
+                odb::transaction trans(_db->begin());
+                for (auto &message : messages) _db->persist(message);
+                trans.commit();
+                return true;
+            } catch (const std::exception &error) {
+                LOG_WARN("消息批事务回滚，将重试: {}", error.what());
+                return false;
+            }
+        }
         bool existsClientMessage(const std::string &sender_id, const std::string &client_message_id) {
             try {
                 odb::transaction trans(_db->begin());

@@ -2,6 +2,14 @@
 
 ## 2026-10-19 增补
 
+第二轮有界微批的源码与边界见 [微批设计](../docs/bounded-message-batching.md)，项目调研见 [机制选择](../docs/performance-research.md)。`batch_analyze.py` 分开汇总 HTTP/ACK、SQL 采样速率、ready 队列和批回调计数，支持从原始样本合并重复轮次的分位数：
+
+```sh
+python benchmarks/batch_analyze.py path/to/second-round/raw
+```
+
+批回调耗时不含前序排队，ready 不含未确认在途投递；都不能直接当作逐消息持久化延迟。新的实验名称使用 `p2-*`，旧轮次的数据不覆盖。
+
 可靠性修复和存储分片设计见 [设计说明](../docs/reliability-performance.md)。新增工具：
 
 - `optimization_probe.py`：并发注册、ES 故障补偿相关 API、并发资料更新、高 FD 下 HTTP/WS 共存。
